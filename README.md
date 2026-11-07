@@ -34,10 +34,19 @@ A bare host gets `http://` and `/v1` added. Anything with an explicit scheme or 
 
 ```sh
 swift run chatcli --base 127.0.0.1:1234 --models
-swift run chatcli --base 127.0.0.1:1234 --model <id> [--key K] "Hello"
+swift run chatcli --base 127.0.0.1:1234 --model <id> [--key K] [--effort low|medium] "Hello"
 ```
 
 Reasoning goes to stderr dimmed, the answer to stdout. Failures exit non-zero.
+
+## Smoke test against your server
+
+```sh
+cp .env.example .env   # set LLM_BASE_URI, optionally LLM_API_KEY and LLM_MODEL
+scripts/smoke.sh
+```
+
+It lists the server's models and streams one reply through `chatcli`. `.env` is git-ignored.
 
 ## Tests
 

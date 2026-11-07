@@ -9,6 +9,12 @@ struct WireChatRequest: Encodable {
     let model: String
     let messages: [WireMessage]
     let stream: Bool
+    let reasoningEffort: ReasoningEffort?
+
+    enum CodingKeys: String, CodingKey {
+        case model, messages, stream
+        case reasoningEffort = "reasoning_effort"
+    }
 }
 
 struct WireChunk: Decodable {

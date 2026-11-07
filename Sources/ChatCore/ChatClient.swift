@@ -25,10 +25,14 @@ public struct ChatClient: Sendable {
         return list.data.map(\.id).sorted()
     }
 
-    public func stream(model: String, messages: [ChatMessage]) -> AsyncThrowingStream<StreamEvent, Error> {
+    public func stream(
+        model: String,
+        messages: [ChatMessage],
+        reasoningEffort: ReasoningEffort? = nil
+    ) -> AsyncThrowingStream<StreamEvent, Error> {
         let request: URLRequest
         do {
-            request = try chatRequest(model: model, messages: messages)
+            request = try chatRequest(model: model, messages: messages, reasoningEffort: reasoningEffort)
         } catch {
             return AsyncThrowingStream { $0.finish(throwing: error) }
         }
@@ -80,7 +84,7 @@ public struct ChatClient: Sendable {
         }
     }
 
-    func chatRequest(model: String, messages: [ChatMessage]) throws -> URLRequest {
+    func chatRequest(model: String, messages: [ChatMessage], reasoningEffort: ReasoningEffort? = nil) throws -> URLRequest {
         var request = URLRequest(url: config.baseURL.appendingPathComponent("chat/completions"))
         request.httpMethod = "POST"
         // Local models can spend minutes on prompt processing before the first token.
@@ -92,7 +96,8 @@ public struct ChatClient: Sendable {
             WireChatRequest(
                 model: model,
                 messages: messages.map { WireMessage(role: $0.role, content: $0.content) },
-                stream: true
+                stream: true,
+                reasoningEffort: reasoningEffort
             )
         )
         return request

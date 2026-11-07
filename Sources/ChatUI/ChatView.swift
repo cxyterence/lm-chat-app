@@ -15,7 +15,9 @@ struct ChatView: View {
             if let message = store.failureMessage(for: live.id) {
                 ErrorBanner(message: message, retry: store.retry, dismiss: store.dismissFailure)
             }
-            Composer(draft: $draft, streaming: streaming, canSend: store.canSend,
+            Composer(draft: $draft, effort: Binding(get: { store.reasoningEffort },
+                                                     set: { store.setReasoningEffort($0) }),
+                     streaming: streaming, canSend: store.canSend,
                      send: send, stop: store.stop)
         }
         .navigationTitle(live.title)
@@ -149,6 +151,7 @@ private struct ErrorBanner: View {
 
 private struct Composer: View {
     @Binding var draft: String
+    @Binding var effort: ReasoningEffort?
     let streaming: Bool
     let canSend: Bool
     let send: () -> Void
@@ -156,6 +159,8 @@ private struct Composer: View {
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 8) {
+            EffortMenu(effort: $effort)
+                .padding(.bottom, 8)
             TextField("Message", text: $draft, axis: .vertical)
                 .lineLimit(1...6)
                 .textFieldStyle(.plain)
@@ -173,6 +178,27 @@ private struct Composer: View {
         .buttonStyle(.plain)
         .padding(.horizontal).padding(.vertical, 8)
         .background(.bar)
+    }
+}
+
+private struct EffortMenu: View {
+    @Binding var effort: ReasoningEffort?
+
+    var body: some View {
+        Menu {
+            Picker("Reasoning effort", selection: $effort) {
+                Text("Server default").tag(ReasoningEffort?.none)
+                ForEach(ReasoningEffort.allCases, id: \.self) { Text($0.rawValue.capitalized).tag(Optional($0)) }
+            }
+        } label: {
+            Label(effort?.rawValue.capitalized ?? "Default", systemImage: "brain")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .fixedSize()
+        .accessibilityLabel("Reasoning effort")
     }
 }
 

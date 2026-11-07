@@ -21,6 +21,7 @@ public final class ChatStore {
         static let baseURL = "baseURL"
         static let model = "model"
         static let systemPrompt = "systemPrompt"
+        static let reasoningEffort = "reasoningEffort"
         static let apiKey = "apiKey"
     }
 
@@ -30,6 +31,7 @@ public final class ChatStore {
     private(set) var apiKey: String
     private(set) var model: String
     private(set) var systemPrompt: String
+    private(set) var reasoningEffort: ReasoningEffort?
     private(set) var models: ModelsState = .idle
     private(set) var generation: Generation = .idle
     private(set) var persistenceError: String?
@@ -43,6 +45,7 @@ public final class ChatStore {
         baseURLText = defaults.string(forKey: Keys.baseURL) ?? ""
         model = defaults.string(forKey: Keys.model) ?? ""
         systemPrompt = defaults.string(forKey: Keys.systemPrompt) ?? ""
+        reasoningEffort = defaults.string(forKey: Keys.reasoningEffort).flatMap(ReasoningEffort.init(rawValue:))
         apiKey = Keychain.get(Keys.apiKey) ?? ""
         do {
             conversations = try ConversationStore.load(from: fileURL)
@@ -89,6 +92,15 @@ public final class ChatStore {
         if let systemPrompt {
             self.systemPrompt = systemPrompt
             defaults.set(systemPrompt, forKey: Keys.systemPrompt)
+        }
+    }
+
+    func setReasoningEffort(_ effort: ReasoningEffort?) {
+        reasoningEffort = effort
+        if let effort {
+            defaults.set(effort.rawValue, forKey: Keys.reasoningEffort)
+        } else {
+            defaults.removeObject(forKey: Keys.reasoningEffort)
         }
     }
 
@@ -195,7 +207,7 @@ public final class ChatStore {
         conversations[index].messages.append(assistant)
         conversations[index].updatedAt = Date()
 
-        let stream = ChatClient(config: config).stream(model: model, messages: wire)
+        let stream = ChatClient(config: config).stream(model: model, messages: wire, reasoningEffort: reasoningEffort)
         let task = Task { [weak self] in
             var failure: String?
             do {

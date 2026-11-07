@@ -20,6 +20,14 @@ struct ClientAndStoreTests {
         #expect(wire.allSatisfy { Set($0.keys) == ["role", "content"] })
     }
 
+    @Test func reasoningEffortIsOmittedUnlessSet() throws {
+        let client = ChatClient(config: try ServerConfig.parse(baseURL: "h:1", apiKey: ""))
+        let none = try #require(jsonObject(client.chatRequest(model: "m", messages: []).httpBody))
+        #expect(none["reasoning_effort"] == nil)
+        let low = try #require(jsonObject(client.chatRequest(model: "m", messages: [], reasoningEffort: .low).httpBody))
+        #expect(low["reasoning_effort"] as? String == "low")
+    }
+
     @Test func noAuthHeaderWithoutKey() throws {
         let config = try ServerConfig.parse(baseURL: "h:1", apiKey: "")
         let request = try ChatClient(config: config).chatRequest(model: "m", messages: [])

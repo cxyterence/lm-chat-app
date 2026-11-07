@@ -6,6 +6,7 @@ struct Options {
     var key = ""
     var model: String?
     var listModels = false
+    var effort: ReasoningEffort?
     var prompt: String?
 }
 
@@ -18,7 +19,7 @@ func fail(_ message: String) -> Never {
     exit(1)
 }
 
-let usage = "usage: chatcli --base <url> [--key K] [--model M] [--models] \"prompt\""
+let usage = "usage: chatcli --base <url> [--key K] [--model M] [--models] [--effort <\(ReasoningEffort.allCases.map(\.rawValue).joined(separator: "|"))>] \"prompt\""
 
 func parseOptions(_ args: [String]) -> Options {
     var options = Options()
@@ -32,6 +33,12 @@ func parseOptions(_ args: [String]) -> Options {
         case "--base": options.base = value(for: arg)
         case "--key": options.key = value(for: arg)
         case "--model": options.model = value(for: arg)
+        case "--effort":
+            let raw = value(for: arg)
+            guard let effort = ReasoningEffort(rawValue: raw) else {
+                fail("invalid --effort \(raw). valid: \(ReasoningEffort.allCases.map(\.rawValue).joined(separator: ", "))")
+            }
+            options.effort = effort
         case "--models": options.listModels = true
         case "-h", "--help": print(usage); exit(0)
         default: options.prompt = arg
@@ -53,7 +60,11 @@ func run(_ options: Options) async throws {
     guard let model = options.model ?? models.first else { fail("server lists no models; pass --model") }
 
     var wroteReasoning = false
-    for try await event in client.stream(model: model, messages: [ChatMessage(role: .user, content: prompt)]) {
+    for try await event in client.stream(
+        model: model,
+        messages: [ChatMessage(role: .user, content: prompt)],
+        reasoningEffort: options.effort
+    ) {
         switch event {
         case .reasoning(let text):
             write("\u{1B}[2m\(text)\u{1B}[0m", to: .standardError)
