@@ -1,0 +1,48 @@
+# LM Chat
+
+An iOS chat client for locally hosted LLMs. Point it at any OpenAI-compatible endpoint (LM Studio, Ollama `/v1`, `llama-server`, vLLM, or a remote HTTPS host), pick a model from `/v1/models`, and chat with streamed replies. Conversations are stored on device.
+
+Connection is two inputs: a URL and an optional API key.
+
+## Layout
+
+- `Sources/ChatCore` Foundation-only client, SSE decoding, `<think>` splitting, persistence.
+- `Sources/ChatUI` SwiftUI views and `ChatStore`. Public entry point is `RootView`.
+- `Sources/chatcli` command-line client built on ChatCore.
+- `App/` the only code in the Xcode app target.
+- `scripts/mock_openai_server.py` stdlib mock server for offline testing.
+
+## Run the app
+
+```sh
+xcodegen generate   # only needed after editing project.yml
+open LMChat.xcodeproj
+```
+
+Pick an iOS 17+ simulator or device and run the `LMChat` scheme. Enter a server address in Settings:
+
+| Server | Address |
+| --- | --- |
+| LM Studio | `192.168.1.5:1234` |
+| Ollama | `192.168.1.5:11434` |
+| llama.cpp | `192.168.1.5:8080` |
+| Remote | `https://box.tailnet.ts.net/v1` |
+
+A bare host gets `http://` and `/v1` added. Anything with an explicit scheme or path is kept as typed (trailing slash trimmed).
+
+## chatcli
+
+```sh
+swift run chatcli --base 127.0.0.1:1234 --models
+swift run chatcli --base 127.0.0.1:1234 --model <id> [--key K] "Hello"
+```
+
+Reasoning goes to stderr dimmed, the answer to stdout. Failures exit non-zero.
+
+## Tests
+
+```sh
+swift test            # with Xcode installed
+scripts/test.sh       # with Command Line Tools only
+python3 scripts/mock_openai_server.py --port 8099
+```
