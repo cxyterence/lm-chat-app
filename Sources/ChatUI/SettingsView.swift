@@ -99,7 +99,7 @@ struct ConnectionsSettings: View {
                 SecureField("API key (optional)", text: $draft.apiKey)
                 Button("Connect") { Task { await connect() } }
                 if let parseError = draft.parseError {
-                    Text(parseError).foregroundStyle(.red).font(.callout)
+                    Text(parseError).foregroundStyle(palette.danger).font(.callout)
                 }
                 statusRow
             } header: {
@@ -142,9 +142,9 @@ struct ConnectionsSettings: View {
             HStack { ProgressView(); Text("Connecting…").foregroundStyle(palette.secondaryText) }
         case .loaded(let ids):
             Label("\(ids.count) model\(ids.count == 1 ? "" : "s")", systemImage: "checkmark.circle.fill")
-                .foregroundStyle(.green)
+                .foregroundStyle(palette.success)
         case .failed(let message):
-            Label(message, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red)
+            Label(message, systemImage: "exclamationmark.triangle.fill").foregroundStyle(palette.danger)
         }
     }
 

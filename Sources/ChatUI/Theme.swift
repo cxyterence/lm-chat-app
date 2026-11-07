@@ -4,10 +4,24 @@ struct Palette: Sendable {
     var background: Color
     var groupedBackground: Color
     var surface: Color
+    var fill: Color
     var text: Color
     var secondaryText: Color
     var accent: Color
     var onAccent: Color
+    var success: Color
+    var danger: Color
+    var markup: Markup
+}
+
+struct Markup: Sendable {
+    var heading: Color
+    var strong: Color
+    var emphasis: Color
+    var code: Color
+    var link: Color
+    var quote: Color
+    var marker: Color
 }
 
 enum Theme: String, CaseIterable, Identifiable {
@@ -39,10 +53,21 @@ enum Theme: String, CaseIterable, Identifiable {
                 background: Color(hex: 0x282A36),
                 groupedBackground: Color(hex: 0x21222C),
                 surface: Color(hex: 0x44475A),
+                fill: Color(hex: 0x44475A),
                 text: Color(hex: 0xF8F8F2),
                 secondaryText: Color(hex: 0x6272A4),
                 accent: Color(hex: 0xBD93F9),
-                onAccent: Color(hex: 0x282A36)))
+                onAccent: Color(hex: 0x282A36),
+                success: Color(hex: 0x50FA7B),
+                danger: Color(hex: 0xFF5555),
+                markup: Markup(
+                    heading: Color(hex: 0xBD93F9),
+                    strong: Color(hex: 0xFFB86C),
+                    emphasis: Color(hex: 0xF1FA8C),
+                    code: Color(hex: 0x50FA7B),
+                    link: Color(hex: 0x8BE9FD),
+                    quote: Color(hex: 0xF1FA8C),
+                    marker: Color(hex: 0xFF79C6))))
         }
     }
 }
@@ -50,21 +75,32 @@ enum Theme: String, CaseIterable, Identifiable {
 extension Palette {
     static let native: Palette = {
         #if os(iOS)
-        Palette(background: Color(uiColor: .systemBackground),
-                groupedBackground: Color(uiColor: .systemGroupedBackground),
-                surface: Color(uiColor: .secondarySystemGroupedBackground),
-                text: Color(uiColor: .label),
-                secondaryText: Color(uiColor: .secondaryLabel),
-                accent: .accentColor, onAccent: .white)
+        let text = Color(uiColor: .label), secondaryText = Color(uiColor: .secondaryLabel)
+        return Palette(background: Color(uiColor: .systemBackground),
+                       groupedBackground: Color(uiColor: .systemGroupedBackground),
+                       surface: Color(uiColor: .secondarySystemGroupedBackground),
+                       fill: Color(uiColor: .secondarySystemBackground),
+                       text: text, secondaryText: secondaryText,
+                       accent: .accentColor, onAccent: .white, success: .green, danger: .red,
+                       markup: .plain(text: text, secondaryText: secondaryText))
         #else
-        Palette(background: Color(nsColor: .windowBackgroundColor),
-                groupedBackground: Color(nsColor: .underPageBackgroundColor),
-                surface: Color(nsColor: .controlBackgroundColor),
-                text: Color(nsColor: .labelColor),
-                secondaryText: Color(nsColor: .secondaryLabelColor),
-                accent: .accentColor, onAccent: .white)
+        let text = Color(nsColor: .labelColor), secondaryText = Color(nsColor: .secondaryLabelColor)
+        return Palette(background: Color(nsColor: .windowBackgroundColor),
+                       groupedBackground: Color(nsColor: .underPageBackgroundColor),
+                       surface: Color(nsColor: .controlBackgroundColor),
+                       fill: Color(nsColor: .quaternaryLabelColor),
+                       text: text, secondaryText: secondaryText,
+                       accent: .accentColor, onAccent: .white, success: .green, danger: .red,
+                       markup: .plain(text: text, secondaryText: secondaryText))
         #endif
     }()
+}
+
+extension Markup {
+    static func plain(text: Color, secondaryText: Color) -> Markup {
+        Markup(heading: text, strong: text, emphasis: text, code: text,
+               link: .accentColor, quote: secondaryText, marker: secondaryText)
+    }
 }
 
 extension Color {

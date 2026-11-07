@@ -120,7 +120,7 @@ private struct AssistantBubble: View {
                 .foregroundStyle(palette.secondaryText)
             }
             if !message.content.isEmpty {
-                Text(markdown(message.content)).foregroundStyle(palette.text).textSelection(.enabled)
+                MarkdownView(text: message.content).foregroundStyle(palette.text).textSelection(.enabled)
             } else if isStreaming && message.reasoning.isEmpty {
                 ProgressView().controlSize(.small)
             }
@@ -129,30 +129,24 @@ private struct AssistantBubble: View {
             Button("Copy", systemImage: "doc.on.doc") { copyToPasteboard(message.content) }
         }
     }
-
-    private func markdown(_ text: String) -> AttributedString {
-        let options = AttributedString.MarkdownParsingOptions(
-            interpretedSyntax: .inlineOnlyPreservingWhitespace
-        )
-        return (try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)
-    }
 }
 
 private struct ErrorBanner: View {
     let message: String
     let retry: () -> Void
     let dismiss: () -> Void
+    @Environment(\.palette) private var palette
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(palette.danger)
             Text(message).font(.callout).frame(maxWidth: .infinity, alignment: .leading)
             Button("Retry", action: retry).buttonStyle(.bordered)
             Button("Dismiss", systemImage: "xmark", action: dismiss)
                 .labelStyle(.iconOnly).buttonStyle(.plain)
         }
         .padding(10)
-        .background(.red.opacity(0.1))
+        .background(palette.danger.opacity(0.12))
     }
 }
 
@@ -174,11 +168,11 @@ private struct Composer: View {
                 .textFieldStyle(.plain)
                 .padding(.horizontal, 12).padding(.vertical, 8)
                 .foregroundStyle(palette.text)
-                .background(palette.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .background(palette.fill, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             if streaming {
                 Button("Stop", systemImage: "stop.circle.fill", action: stop)
                     .labelStyle(.iconOnly).font(.title)
-                    .foregroundStyle(palette.accent)
+                    .foregroundStyle(palette.danger)
             } else {
                 Button("Send", systemImage: "arrow.up.circle.fill", action: send)
                     .labelStyle(.iconOnly).font(.title)
