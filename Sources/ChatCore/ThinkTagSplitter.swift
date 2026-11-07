@@ -2,12 +2,15 @@ import Foundation
 
 /// Splits inline `<think>…</think>` blocks out of streamed content.
 /// Holds back only a trailing run that could still become a tag.
+/// Drops whitespace before the first visible content, since models emit
+/// blank lines after their reasoning.
 struct ThinkTagSplitter {
     private static let open = "<think>"
     private static let close = "</think>"
 
     private var buffer = ""
     private var insideThink = false
+    private var contentStarted = false
 
     mutating func push(_ delta: String) -> [StreamEvent] {
         buffer += delta
@@ -36,9 +39,15 @@ struct ThinkTagSplitter {
         return events
     }
 
-    private func emit(_ text: String, into events: inout [StreamEvent]) {
-        guard !text.isEmpty else { return }
-        events.append(insideThink ? .reasoning(text) : .content(text))
+    private mutating func emit(_ text: String, into events: inout [StreamEvent]) {
+        if insideThink {
+            if !text.isEmpty { events.append(.reasoning(text)) }
+            return
+        }
+        let visible = contentStarted ? Substring(text) : text.drop(while: \.isWhitespace)
+        guard !visible.isEmpty else { return }
+        contentStarted = true
+        events.append(.content(String(visible)))
     }
 
     private func partialTagSuffixLength(of tag: String) -> Int {

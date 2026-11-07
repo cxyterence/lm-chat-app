@@ -23,6 +23,9 @@ struct ThinkTagSplitterTests {
         ("a<think>b</think>c<think>d</think>e", "ace", "bd"),
         ("1 < 2 and <thin", "1 < 2 and <thin", ""),
         ("<think>unterminated </thi", "", "unterminated </thi"),
+        ("<think>plan</think>\n\nOkay.", "Okay.", "plan"),
+        ("\n\n  Okay.\n", "Okay.\n", ""),
+        ("a<think>b</think>\n\nc", "a\n\nc", "b"),
     ])
     func splitsAtEveryBoundary(input: String, content: String, reasoning: String) {
         let chars = Array(input)
