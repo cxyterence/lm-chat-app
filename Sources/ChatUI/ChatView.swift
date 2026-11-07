@@ -17,9 +17,7 @@ struct ChatView: View {
             if let message = store.failureMessage(for: live.id) {
                 ErrorBanner(message: message, retry: store.retry, dismiss: store.dismissFailure)
             }
-            Composer(draft: $draft, effort: Binding(get: { store.reasoningEffort },
-                                                     set: { store.setReasoningEffort($0) }),
-                     focused: $composerFocused, streaming: streaming, canSend: store.canSend,
+            Composer(draft: $draft, focused: $composerFocused, streaming: streaming, canSend: store.canSend,
                      send: send, stop: store.stop)
         }
         .foregroundStyle(palette.text)
@@ -29,7 +27,7 @@ struct ChatView: View {
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
-        .toolbar { ToolbarItem(placement: .primaryAction) { ModelMenu(store: store) } }
+        .toolbar { ToolbarItem(placement: .primaryAction) { ModelButton(store: store) } }
     }
 
     private var messageList: some View {
@@ -155,7 +153,6 @@ private struct ErrorBanner: View {
 
 private struct Composer: View {
     @Binding var draft: String
-    @Binding var effort: ReasoningEffort?
     var focused: FocusState<Bool>.Binding
     let streaming: Bool
     let canSend: Bool
@@ -165,8 +162,6 @@ private struct Composer: View {
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 8) {
-            EffortMenu(effort: $effort)
-                .padding(.bottom, 8)
             TextField("Message", text: $draft, axis: .vertical)
                 .lineLimit(1...6)
                 .focused(focused)
@@ -194,46 +189,100 @@ private struct Composer: View {
     }
 }
 
-private struct EffortMenu: View {
-    @Binding var effort: ReasoningEffort?
-    @Environment(\.palette) private var palette
+private struct ModelButton: View {
+    let store: ChatStore
+    @State private var open = false
 
     var body: some View {
-        Menu {
-            Picker("Reasoning effort", selection: $effort) {
-                Text("Server default").tag(ReasoningEffort?.none)
-                ForEach(ReasoningEffort.allCases, id: \.self) { Text($0.rawValue.capitalized).tag(Optional($0)) }
-            }
-        } label: {
-            Label(effort?.rawValue.capitalized ?? "Default", systemImage: "brain")
-                .font(.subheadline)
-                .foregroundStyle(palette.secondaryText)
+        Button { open = true } label: {
+            Label(store.model.isEmpty ? "Model" : store.model, systemImage: "cpu")
         }
-        .menuStyle(.button)
-        .buttonStyle(.plain)
-        .fixedSize()
-        .accessibilityLabel("Reasoning effort")
+        .accessibilityLabel("Model and reasoning")
+        .popover(isPresented: $open) {
+            ModelPanel(store: store).presentationCompactAdaptation(.popover)
+        }
     }
 }
 
-private struct ModelMenu: View {
+private struct ModelPanel: View {
     let store: ChatStore
+    @Environment(\.palette) private var palette
+
+    /// Slider positions, ordered by how much the model thinks. nil omits the field, which is the server's own default.
+    private static let detents: [ReasoningEffort?] = [.low, .medium, nil]
+
+    private var detent: Binding<Double> {
+        Binding(
+            get: { Double(Self.detents.firstIndex(of: store.reasoningEffort) ?? Self.detents.count - 1) },
+            set: { store.setReasoningEffort(Self.detents[Int($0.rounded())]) }
+        )
+    }
 
     var body: some View {
-        Menu {
-            Picker("Model", selection: Binding(
-                get: { store.model },
-                set: { store.updatePreferences(model: $0) }
-            )) {
-                if !store.availableModels.contains(store.model), !store.model.isEmpty {
-                    Text(store.model).tag(store.model)
-                }
-                ForEach(store.availableModels, id: \.self) { Text($0).tag($0) }
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("Model").font(.headline)
+                Spacer()
+                Button("Refresh Models", systemImage: "arrow.clockwise") { Task { await store.refreshModels() } }
+                    .labelStyle(.iconOnly)
             }
-            Divider()
-            Button("Refresh Models", systemImage: "arrow.clockwise") { Task { await store.refreshModels() } }
-        } label: {
-            Label(store.model.isEmpty ? "Model" : store.model, systemImage: "cpu")
+            ViewThatFits(in: .vertical) {
+                modelList
+                ScrollView { modelList }.frame(maxHeight: 240)
+            }
+            Divider().overlay(palette.secondaryText.opacity(0.3))
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Reasoning effort").font(.headline)
+                    Spacer()
+                    Text(store.reasoningEffort?.rawValue.capitalized ?? "Server default")
+                        .foregroundStyle(palette.accent)
+                        .contentTransition(.numericText())
+                        .animation(.snappy, value: store.reasoningEffort)
+                }
+                Slider(value: detent, in: 0...Double(Self.detents.count - 1), step: 1)
+                    .accessibilityLabel("Reasoning effort")
+                    .accessibilityValue(store.reasoningEffort?.rawValue.capitalized ?? "Server default")
+                HStack {
+                    Text("Low")
+                    Spacer()
+                    Text("Medium")
+                    Spacer()
+                    Text("Server default")
+                }
+                .font(.caption)
+                .foregroundStyle(palette.secondaryText)
+                Text("Lower effort answers sooner. Server default leaves the choice to the server.")
+                    .font(.caption2)
+                    .foregroundStyle(palette.secondaryText)
+            }
+        }
+        .padding()
+        .frame(width: 320)
+        .foregroundStyle(palette.text)
+        .presentationBackground(palette.surface)
+        .sensoryFeedback(.selection, trigger: store.reasoningEffort)
+    }
+
+    @ViewBuilder private var modelList: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if store.availableModels.isEmpty {
+                Text(store.model.isEmpty ? "No models loaded. Check the server in Settings." : store.model)
+                    .font(.callout)
+                    .foregroundStyle(palette.secondaryText)
+            }
+            ForEach(store.availableModels, id: \.self) { id in
+                Button { store.updatePreferences(model: id) } label: {
+                    HStack {
+                        Text(id).lineLimit(1).truncationMode(.middle)
+                        Spacer()
+                        if id == store.model { Image(systemName: "checkmark").foregroundStyle(palette.accent) }
+                    }
+                    .padding(.vertical, 6)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
         }
     }
 }
