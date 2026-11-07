@@ -2,6 +2,17 @@ import ChatCore
 import Foundation
 import Observation
 
+/// The reply being streamed. Kept apart from `conversations` so a token only invalidates the bubble that
+/// shows it, not every view that reads the conversation list.
+@MainActor @Observable
+final class LiveReply {
+    let messageID: UUID
+    var content = ""
+    var reasoning = ""
+
+    init(messageID: UUID) { self.messageID = messageID }
+}
+
 @MainActor @Observable
 public final class ChatStore {
     enum Generation {
@@ -36,6 +47,7 @@ public final class ChatStore {
     private(set) var theme: Theme
     private(set) var models: ModelsState = .idle
     private(set) var generation: Generation = .idle
+    private(set) var liveReply: LiveReply?
     private(set) var persistenceError: String?
 
     @ObservationIgnored let defaults: UserDefaults
@@ -233,6 +245,7 @@ public final class ChatStore {
         let assistant = ChatMessage(role: .assistant, content: "")
         conversations[index].messages.append(assistant)
         conversations[index].updatedAt = Date()
+        liveReply = LiveReply(messageID: assistant.id)
 
         let stream = ChatClient(config: config).stream(model: model, messages: wire, reasoningEffort: reasoningEffort)
         let task = Task { [weak self] in
@@ -250,12 +263,10 @@ public final class ChatStore {
     }
 
     private func apply(_ event: StreamEvent, to messageID: UUID, in conversationID: UUID) {
-        guard let c = conversations.firstIndex(where: { $0.id == conversationID }),
-              let m = conversations[c].messages.firstIndex(where: { $0.id == messageID })
-        else { return }
+        guard let reply = liveReply, reply.messageID == messageID else { return }
         switch event {
-        case .content(let text): conversations[c].messages[m].content += text
-        case .reasoning(let text): conversations[c].messages[m].reasoning += text
+        case .content(let text): reply.content += text
+        case .reasoning(let text): reply.reasoning += text
         case .done: break
         }
     }
@@ -263,12 +274,17 @@ public final class ChatStore {
     private func finish(conversationID id: UUID, assistantID: UUID, failure: String?) {
         if let c = conversations.firstIndex(where: { $0.id == id }),
            let m = conversations[c].messages.firstIndex(where: { $0.id == assistantID }) {
+            if let reply = liveReply, reply.messageID == assistantID {
+                conversations[c].messages[m].content = reply.content
+                conversations[c].messages[m].reasoning = reply.reasoning
+            }
             let message = conversations[c].messages[m]
             if message.content.isEmpty && message.reasoning.isEmpty {
                 conversations[c].messages.remove(at: m)
             }
             conversations[c].updatedAt = Date()
         }
+        if liveReply?.messageID == assistantID { liveReply = nil }
         generation = failure.map { .failed(conversationID: id, message: $0) } ?? .idle
         persist()
     }

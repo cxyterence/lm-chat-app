@@ -7,16 +7,19 @@ struct MarkdownView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             ForEach(Array(Markdown.blocks(from: text).enumerated()), id: \.offset) { _, block in
-                BlockView(block: block)
+                BlockView(block: block).equatable()
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
-private struct BlockView: View {
+/// Equatable so a reply growing at its end doesn't re-parse and re-lay out every settled block above it.
+private struct BlockView: View, Equatable {
     let block: MarkdownBlock
     @Environment(\.palette) private var palette
+
+    nonisolated static func == (lhs: BlockView, rhs: BlockView) -> Bool { lhs.block == rhs.block }
 
     var body: some View {
         switch block {

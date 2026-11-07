@@ -37,8 +37,8 @@ struct ChatView: View {
             ScrollView {
                 VStack(spacing: 12) {
                     ForEach(live.messages) { message in
-                        MessageRow(message: message,
-                                   isStreaming: streaming && message.id == live.messages.last?.id)
+                        let isLive = streaming && message.id == live.messages.last?.id
+                        MessageRow(message: message, isStreaming: isLive, reply: isLive ? store.liveReply : nil)
                             .transition(.opacity.combined(with: .offset(y: 12)))
                     }
                     Color.clear.frame(height: 1).id("bottom")
@@ -72,7 +72,7 @@ struct ChatView: View {
                 }
             }
             .animation(.snappy(duration: 0.2), value: scrolledAway)
-            .onChange(of: live.messages.last?.content) {
+            .onChange(of: FollowStream.supported ? 0 : store.liveReply?.content.utf8.count ?? 0) {
                 if !FollowStream.supported && atBottom { proxy.scrollTo("bottom") }
             }
             .onChange(of: live.messages.count) {
@@ -99,6 +99,7 @@ struct ChatView: View {
 private struct MessageRow: View {
     let message: ChatMessage
     let isStreaming: Bool
+    let reply: LiveReply?
     @Environment(\.palette) private var palette
 
     var body: some View {
@@ -115,7 +116,7 @@ private struct MessageRow: View {
             }
         case .assistant:
             HStack {
-                AssistantBubble(message: message, isStreaming: isStreaming)
+                AssistantBubble(message: message, isStreaming: isStreaming, reply: reply)
                 Spacer(minLength: 48)
             }
         case .system:
@@ -127,7 +128,11 @@ private struct MessageRow: View {
 private struct AssistantBubble: View {
     let message: ChatMessage
     let isStreaming: Bool
+    let reply: LiveReply?
     @State private var thinkingOverride: Bool?
+
+    private var content: String { reply?.content ?? message.content }
+    private var reasoning: String { reply?.reasoning ?? message.reasoning }
     @Environment(\.palette) private var palette
 
     private var thinkingExpanded: Binding<Bool> {
@@ -139,34 +144,34 @@ private struct AssistantBubble: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if !message.reasoning.isEmpty {
+            if !reasoning.isEmpty {
                 DisclosureGroup(isExpanded: thinkingExpanded) {
-                    Paced(text: message.reasoning, live: isStreaming) { text, _ in
-                        Text(text)
+                    Paced(text: reasoning, live: isStreaming) { text, unfinished in
+                        ParagraphText(text: text, latestOnly: unfinished)
                             .font(.callout)
                             .foregroundStyle(palette.secondaryText)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .textSelection(.enabled)
                     }
                 } label: {
-                    ThinkingLabel(reasoning: message.reasoning,
-                                  live: isStreaming && message.content.isEmpty && !thinkingExpanded.wrappedValue)
+                    ThinkingLabel(reasoning: reasoning,
+                                  live: isStreaming && content.isEmpty && !thinkingExpanded.wrappedValue)
                 }
                 .font(.subheadline)
                 .foregroundStyle(palette.secondaryText)
             }
-            if !message.content.isEmpty {
-                Paced(text: message.content, live: isStreaming) { text, unfinished in
+            if !content.isEmpty {
+                Paced(text: content, live: isStreaming) { text, unfinished in
                     MarkdownView(text: unfinished ? Markdown.completingPartial(text) : text)
                         .foregroundStyle(palette.text)
                         .textSelection(.enabled)
                 }
-            } else if isStreaming && message.reasoning.isEmpty {
+            } else if isStreaming && reasoning.isEmpty {
                 TypingDots().transition(.opacity)
             }
         }
         .contextMenu {
-            Button("Copy", systemImage: "doc.on.doc") { copyToPasteboard(message.content) }
+            Button("Copy", systemImage: "doc.on.doc") { copyToPasteboard(content) }
         }
     }
 }
@@ -210,6 +215,25 @@ private struct Paced<Content: View>: View {
                                           elapsed: Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) * 1e-18)
                 }
             }
+    }
+}
+
+/// Long reasoning as one Text is laid out again in full on every token. Settled paragraphs keep their layout.
+/// While streaming, only the latest stretch is shown so each update costs the same however long the model thinks.
+private struct ParagraphText: View {
+    let text: String
+    let latestOnly: Bool
+
+    var body: some View {
+        let shown = latestOnly ? Paragraphs.tail(text) : text[...]
+        VStack(alignment: .leading, spacing: 8) {
+            if shown.count < text.count {
+                Text("Showing latest thinking").font(.caption2).italic()
+            }
+            ForEach(Array(Paragraphs.split(String(shown)).enumerated()), id: \.offset) { _, piece in
+                Text(piece)
+            }
+        }
     }
 }
 
