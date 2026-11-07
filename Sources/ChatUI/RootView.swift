@@ -76,7 +76,6 @@ private struct Sidebar: View {
             }
         }
         .navigationTitle("Chats")
-        .themedNavigationBar()
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button("New Chat", systemImage: "square.and.pencil") { store.newConversation() }
