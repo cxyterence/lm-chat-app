@@ -34,7 +34,7 @@ struct ChatView: View {
     private var messageList: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(spacing: 12) {
+                VStack(spacing: 12) {
                     ForEach(live.messages) { message in
                         MessageRow(message: message,
                                    isStreaming: streaming && message.id == live.messages.last?.id)
