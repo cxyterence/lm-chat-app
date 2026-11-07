@@ -37,12 +37,15 @@ struct ChatView: View {
                     ForEach(live.messages) { message in
                         MessageRow(message: message,
                                    isStreaming: streaming && message.id == live.messages.last?.id)
+                            .transition(.opacity.combined(with: .offset(y: 12)))
                     }
                     Color.clear.frame(height: 1).id("bottom")
                 }
                 .padding()
+                .animation(.smooth(duration: 0.35), value: live.messages.count)
             }
             .defaultScrollAnchor(.bottom)
+            .modifier(FollowGrowth())
             .scrollDismissesKeyboard(.interactively)
             .simultaneousGesture(TapGesture().onEnded { composerFocused = false })
             .overlay {
@@ -54,9 +57,8 @@ struct ChatView: View {
                         .foregroundStyle(palette.secondaryText)
                 }
             }
-            .onChange(of: live.messages.last?.content) { proxy.scrollTo("bottom") }
-            .onChange(of: live.messages.last?.reasoning) { proxy.scrollTo("bottom") }
-            .onChange(of: live.messages.count) { proxy.scrollTo("bottom") }
+            .onChange(of: live.messages.last?.content) { if !FollowGrowth.supported { proxy.scrollTo("bottom") } }
+            .onChange(of: live.messages.count) { withAnimation(.smooth) { proxy.scrollTo("bottom") } }
         }
     }
 
@@ -111,23 +113,102 @@ private struct AssistantBubble: View {
         VStack(alignment: .leading, spacing: 8) {
             if !message.reasoning.isEmpty {
                 DisclosureGroup("Thinking", isExpanded: thinkingExpanded) {
-                    Text(message.reasoning)
-                        .font(.callout)
-                        .foregroundStyle(palette.secondaryText)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
+                    Paced(text: message.reasoning, live: isStreaming) { text in
+                        Text(text)
+                            .font(.callout)
+                            .foregroundStyle(palette.secondaryText)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    }
                 }
                 .font(.subheadline)
                 .foregroundStyle(palette.secondaryText)
             }
             if !message.content.isEmpty {
-                MarkdownView(text: message.content).foregroundStyle(palette.text).textSelection(.enabled)
+                Paced(text: message.content, live: isStreaming) { text in
+                    MarkdownView(text: text).foregroundStyle(palette.text).textSelection(.enabled)
+                }
             } else if isStreaming && message.reasoning.isEmpty {
-                ProgressView().controlSize(.small)
+                TypingDots().transition(.opacity)
             }
         }
         .contextMenu {
             Button("Copy", systemImage: "doc.on.doc") { copyToPasteboard(message.content) }
+        }
+    }
+}
+
+/// Reveals streamed text at a steady pace. Text that existed before the view appeared shows at once.
+private struct Paced<Content: View>: View {
+    let text: String
+    @ViewBuilder let content: (String) -> Content
+    @State private var shown: Int?
+    @State private var height: CGFloat?
+
+    init(text: String, live: Bool, @ViewBuilder content: @escaping (String) -> Content) {
+        self.text = text
+        self.content = content
+        _shown = State(initialValue: live ? 0 : nil)
+    }
+
+    var body: some View {
+        content(shown.map { String(text.prefix($0)) } ?? text)
+            .fixedSize(horizontal: false, vertical: true)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { newHeight in
+                guard shown != nil, height != nil else { height = newHeight; return }
+                withAnimation(.smooth(duration: 0.25)) { height = newHeight }
+            }
+            // While revealing, the frame eases to each new line's height so the pinned scroll slides rather than steps.
+            .frame(height: shown == nil ? nil : height, alignment: .top)
+            .clipped()
+            .task(id: text.count) {
+                guard let start = shown, start != text.count else { return }
+                var pacer = RevealPacer(shown: start)
+                var last = ContinuousClock.now
+                while !Task.isCancelled, pacer.shown != text.count {
+                    try? await Task.sleep(for: .milliseconds(16))
+                    let now = ContinuousClock.now
+                    let elapsed = now - last
+                    last = now
+                    shown = pacer.advance(toward: text.count,
+                                          elapsed: Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) * 1e-18)
+                }
+            }
+    }
+}
+
+private struct TypingDots: View {
+    @Environment(\.palette) private var palette
+
+    var body: some View {
+        HStack(spacing: 5) {
+            ForEach(0..<3) { index in
+                Circle()
+                    .fill(palette.secondaryText)
+                    .frame(width: 7, height: 7)
+                    .phaseAnimator([0.3, 1.0]) { dot, phase in
+                        dot.opacity(phase).scaleEffect(0.7 + 0.3 * phase)
+                    } animation: { _ in
+                        .easeInOut(duration: 0.5).delay(Double(index) * 0.15)
+                    }
+            }
+        }
+        .padding(.vertical, 6)
+        .accessibilityLabel("Waiting for reply")
+    }
+}
+
+/// Keeps the newest text in view as a reply grows. iOS 17 has no size-change anchor, so it falls back to scrollTo.
+private struct FollowGrowth: ViewModifier {
+    static var supported: Bool {
+        if #available(iOS 18, macOS 15, *) { true } else { false }
+    }
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18, macOS 15, *) {
+            content.defaultScrollAnchor(.bottom, for: .sizeChanges)
+        } else {
+            content
         }
     }
 }

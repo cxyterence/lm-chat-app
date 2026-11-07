@@ -6,11 +6,13 @@ Models:
   mock-reasoning  reasoning_content deltas, then content
   mock-ollama     `reasoning` deltas (Ollama style), then content
   mock-think      <think>..</think> inline in content, tags split across chunks
+A prompt starting with "/long" streams a long Markdown reply in irregular bursts, like a real network.
 Set MOCK_API_KEY to require `Authorization: Bearer <key>`.
 """
 import argparse
 import json
 import os
+import random
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -34,6 +36,41 @@ def script(model, reply):
         return [chunk({"content": t}) for t in ["<thi", "nk>Pondering ", "the que", "stion</th", "ink>\n\n"]] + \
                [chunk({"content": w}) for w in words]
     return [chunk({"content": w}) for w in words]
+
+
+LONG_REPLY = """## How NVFP4 works
+
+NVFP4 stores each weight in **4 bits** using the E2M1 layout, and groups values into blocks of 16 that share an FP8 scale.
+
+### Why blocks help
+1. A single outlier only stretches the scale of its own block
+2. The FP8 scale keeps more dynamic range than an integer scale
+3. A per-tensor FP32 scale covers what the block scales cannot
+
+> In practice accuracy lands close to FP8 for most large models.
+
+| Format | Bits per value | Scale granularity |
+|--------|---------------:|-------------------|
+| FP8 | 8 | per tensor |
+| MXFP4 | 4 | per 32 values |
+| NVFP4 | 4 | per 16 values |
+
+```python
+w_q = quantize(w, fmt="nvfp4", block=16)
+```
+
+That is the whole idea. Smaller blocks cost a little more metadata but track the data much more closely, which is why NVFP4 holds up where plain INT4 starts to drift.
+"""
+
+
+def bursty(text, seed=7):
+    rng = random.Random(seed)
+    pieces, i = [], 0
+    while i < len(text):
+        n = rng.choice([2, 4, 8, 16, 32, 48])
+        pieces.append((text[i:i + n], rng.choice([0.01, 0.02, 0.05, 0.12, 0.25])))
+        i += n
+    return pieces
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -82,6 +119,11 @@ class Handler(BaseHTTPRequestHandler):
             words = last_user.split("\n\n", 1)[-1].split()[:4]
             reply = f'Title: "{" ".join(words).title()}."'
         events = script(model, reply)
+        delays = [0.03] * len(events)
+        if last_user.strip().startswith("/long"):
+            pieces = bursty(LONG_REPLY)
+            events = [chunk({"content": t}) for t, _ in pieces]
+            delays = [d for _, d in pieces]
 
         if not body.get("stream"):
             content = "".join(e["choices"][0]["delta"].get("content", "") for e in events)
@@ -94,10 +136,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self.wfile.write(b": mock stream\n\n")
-        for e in events + [chunk({}, "stop")]:
+        for e, delay in zip(events + [chunk({}, "stop")], delays + [0]):
             self.wfile.write(f"data: {json.dumps(e)}\n\n".encode())
             self.wfile.flush()
-            time.sleep(0.03)
+            time.sleep(delay)
         self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
 
