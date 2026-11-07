@@ -14,7 +14,7 @@
 /* Begin PBXFileReference section */
 		6F1D7E4531F0616F1A784EB8 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		AC05F69D390DA08DA8E901FF /* LMChatApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LMChatApp.swift; sourceTree = "<group>"; };
-		DFBFF72EB3BAAC7769346245 /* LMChat.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = LMChat.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		DFBFF72EB3BAAC7769346245 /* LMChat.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LMChat.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		E64485896166FF48C325875F /* lm-chat-app */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "lm-chat-app"; path = .; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
@@ -94,8 +94,6 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1430;
-				TargetAttributes = {
-				};
 			};
 			buildConfigurationList = 93D1B8F02ACF414C1897EF2C /* Build configuration list for PBXProject "LMChat" */;
 			developmentRegion = en;
@@ -192,6 +190,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = BRXSQTZQ9X;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = App/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -273,6 +272,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = BRXSQTZQ9X;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = App/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
