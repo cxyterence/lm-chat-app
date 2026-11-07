@@ -22,6 +22,7 @@ public final class ChatStore {
         static let model = "model"
         static let systemPrompt = "systemPrompt"
         static let reasoningEffort = "reasoningEffort"
+        static let theme = "theme"
         static let apiKey = "apiKey"
     }
 
@@ -32,21 +33,27 @@ public final class ChatStore {
     private(set) var model: String
     private(set) var systemPrompt: String
     private(set) var reasoningEffort: ReasoningEffort?
+    private(set) var theme: Theme
     private(set) var models: ModelsState = .idle
     private(set) var generation: Generation = .idle
     private(set) var persistenceError: String?
 
-    @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored let defaults: UserDefaults
     @ObservationIgnored private let fileURL: URL
 
-    public init(defaults: UserDefaults = .standard, fileURL: URL = ChatStore.defaultFileURL) {
+    public convenience init() {
+        self.init(defaults: .standard, fileURL: ChatStore.defaultFileURL)
+    }
+
+    init(defaults: UserDefaults, fileURL: URL, apiKey: String? = nil) {
         self.defaults = defaults
         self.fileURL = fileURL
         baseURLText = defaults.string(forKey: Keys.baseURL) ?? ""
         model = defaults.string(forKey: Keys.model) ?? ""
         systemPrompt = defaults.string(forKey: Keys.systemPrompt) ?? ""
         reasoningEffort = defaults.string(forKey: Keys.reasoningEffort).flatMap(ReasoningEffort.init(rawValue:))
-        apiKey = Keychain.get(Keys.apiKey) ?? ""
+        theme = defaults.string(forKey: Keys.theme).flatMap(Theme.init(rawValue:)) ?? .system
+        self.apiKey = apiKey ?? Keychain.get(Keys.apiKey) ?? ""
         do {
             conversations = try ConversationStore.load(from: fileURL)
                 .sorted { $0.updatedAt > $1.updatedAt }
@@ -102,6 +109,11 @@ public final class ChatStore {
         } else {
             defaults.removeObject(forKey: Keys.reasoningEffort)
         }
+    }
+
+    func setTheme(_ theme: Theme) {
+        self.theme = theme
+        defaults.set(theme.rawValue, forKey: Keys.theme)
     }
 
     func refreshModels() async {

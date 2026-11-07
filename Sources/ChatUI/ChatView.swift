@@ -5,6 +5,7 @@ struct ChatView: View {
     @Bindable var store: ChatStore
     let conversation: Conversation
     @State private var draft = ""
+    @Environment(\.palette) private var palette
 
     private var live: Conversation { store.selectedConversation ?? conversation }
     private var streaming: Bool { store.isStreaming(live.id) }
@@ -20,7 +21,10 @@ struct ChatView: View {
                      streaming: streaming, canSend: store.canSend,
                      send: send, stop: store.stop)
         }
+        .foregroundStyle(palette.text)
+        .background(palette.background)
         .navigationTitle(live.title)
+        .themedNavigationBar()
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
@@ -46,6 +50,7 @@ struct ChatView: View {
                                            description: Text(store.isConfigured
                                                              ? "Type a message below."
                                                              : "Add a server in Settings first."))
+                        .foregroundStyle(palette.secondaryText)
                 }
             }
             .onChange(of: live.messages.last?.content) { proxy.scrollTo("bottom") }
@@ -63,6 +68,7 @@ struct ChatView: View {
 private struct MessageRow: View {
     let message: ChatMessage
     let isStreaming: Bool
+    @Environment(\.palette) private var palette
 
     var body: some View {
         switch message.role {
@@ -72,8 +78,8 @@ private struct MessageRow: View {
                 Text(message.content)
                     .textSelection(.enabled)
                     .padding(.horizontal, 12).padding(.vertical, 8)
-                    .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    .foregroundStyle(.white)
+                    .background(palette.accent, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .foregroundStyle(palette.onAccent)
                     .contextMenu { Button("Copy", systemImage: "doc.on.doc") { copyToPasteboard(message.content) } }
             }
         case .assistant:
@@ -91,6 +97,7 @@ private struct AssistantBubble: View {
     let message: ChatMessage
     let isStreaming: Bool
     @State private var thinkingOverride: Bool?
+    @Environment(\.palette) private var palette
 
     private var thinkingExpanded: Binding<Bool> {
         Binding(
@@ -105,15 +112,15 @@ private struct AssistantBubble: View {
                 DisclosureGroup("Thinking", isExpanded: thinkingExpanded) {
                     Text(message.reasoning)
                         .font(.callout)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(palette.secondaryText)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .textSelection(.enabled)
                 }
                 .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(palette.secondaryText)
             }
             if !message.content.isEmpty {
-                Text(markdown(message.content)).textSelection(.enabled)
+                Text(markdown(message.content)).foregroundStyle(palette.text).textSelection(.enabled)
             } else if isStreaming && message.reasoning.isEmpty {
                 ProgressView().controlSize(.small)
             }
@@ -156,6 +163,7 @@ private struct Composer: View {
     let canSend: Bool
     let send: () -> Void
     let stop: () -> Void
+    @Environment(\.palette) private var palette
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 8) {
@@ -165,24 +173,31 @@ private struct Composer: View {
                 .lineLimit(1...6)
                 .textFieldStyle(.plain)
                 .padding(.horizontal, 12).padding(.vertical, 8)
-                .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .foregroundStyle(palette.text)
+                .background(palette.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             if streaming {
                 Button("Stop", systemImage: "stop.circle.fill", action: stop)
                     .labelStyle(.iconOnly).font(.title)
+                    .foregroundStyle(palette.accent)
             } else {
                 Button("Send", systemImage: "arrow.up.circle.fill", action: send)
                     .labelStyle(.iconOnly).font(.title)
+                    .foregroundStyle(palette.accent)
                     .disabled(!canSend || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
         .buttonStyle(.plain)
         .padding(.horizontal).padding(.vertical, 8)
-        .background(.bar)
+        .background(palette.background)
+        .overlay(alignment: .top) {
+            Rectangle().fill(palette.secondaryText.opacity(0.3)).frame(height: 0.5)
+        }
     }
 }
 
 private struct EffortMenu: View {
     @Binding var effort: ReasoningEffort?
+    @Environment(\.palette) private var palette
 
     var body: some View {
         Menu {
@@ -193,7 +208,7 @@ private struct EffortMenu: View {
         } label: {
             Label(effort?.rawValue.capitalized ?? "Default", systemImage: "brain")
                 .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(palette.secondaryText)
         }
         .menuStyle(.button)
         .buttonStyle(.plain)

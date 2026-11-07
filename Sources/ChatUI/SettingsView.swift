@@ -1,57 +1,51 @@
 import ChatCore
 import SwiftUI
 
+enum SettingsTab: String, CaseIterable, Identifiable {
+    case connections, appearance
+
+    var id: String { rawValue }
+    var title: String { rawValue.capitalized }
+}
+
+struct ConnectionDraft {
+    var baseURL = ""
+    var apiKey = ""
+    var systemPrompt = ""
+    var model = ""
+    var parseError: String?
+}
+
 struct SettingsView: View {
     let store: ChatStore
+    @AppStorage private var tab: SettingsTab
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.palette) private var palette
+    @State private var draft = ConnectionDraft()
 
-    @State private var baseURL = ""
-    @State private var apiKey = ""
-    @State private var systemPrompt = ""
-    @State private var model = ""
-    @State private var parseError: String?
+    init(store: ChatStore) {
+        self.store = store
+        _tab = AppStorage(wrappedValue: .connections, "settingsTab", store: store.defaults)
+    }
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section {
-                    TextField("Server URL", text: $baseURL)
-                        .autocorrectionDisabled()
-                        #if os(iOS)
-                        .textInputAutocapitalization(.never)
-                        .keyboardType(.URL)
-                        #endif
-                    SecureField("API key (optional)", text: $apiKey)
-                    Button("Connect") { Task { await connect() } }
-                    if let parseError {
-                        Text(parseError).foregroundStyle(.red).font(.callout)
-                    }
-                    statusRow
-                } header: {
-                    Text("Server")
-                } footer: {
-                    Text("Examples: 192.168.1.5:1234 (LM Studio), 192.168.1.5:11434 (Ollama), 192.168.1.5:8080 (llama.cpp). \"/v1\" is added when the address has no path.")
+            VStack(spacing: 0) {
+                Picker("Settings", selection: $tab) {
+                    ForEach(SettingsTab.allCases) { Text($0.title).tag($0) }
                 }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .padding()
 
-                if !store.availableModels.isEmpty {
-                    Section("Model") {
-                        Picker("Model", selection: $model) {
-                            ForEach(store.availableModels, id: \.self) { Text($0).tag($0) }
-                        }
-                    }
-                }
-
-                Section {
-                    TextEditor(text: $systemPrompt)
-                        .frame(minHeight: 100)
-                } header: {
-                    Text("System Prompt")
-                } footer: {
-                    Text("Sent before every conversation. Leave empty for none.")
+                switch tab {
+                case .connections: ConnectionsSettings(store: store, draft: $draft)
+                case .appearance: AppearanceSettings(store: store)
                 }
             }
-            .formStyle(.grouped)
+            .background(palette.groupedBackground)
             .navigationTitle("Settings")
+            .themedNavigationBar()
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
@@ -65,19 +59,87 @@ struct SettingsView: View {
         .frame(minWidth: 420, minHeight: 520)
         #endif
         .onAppear {
-            baseURL = store.baseURLText
-            apiKey = store.apiKey
-            systemPrompt = store.systemPrompt
-            model = store.model
+            draft.baseURL = store.baseURLText
+            draft.apiKey = store.apiKey
+            draft.systemPrompt = store.systemPrompt
+            draft.model = store.model
         }
+    }
+
+    private func done() {
+        do {
+            if draft.baseURL != store.baseURLText || draft.apiKey != store.apiKey {
+                try store.applyServer(baseURL: draft.baseURL, apiKey: draft.apiKey)
+                Task { await store.refreshModels() }
+            }
+        } catch {
+            draft.parseError = error.localizedDescription
+            tab = .connections
+            return
+        }
+        store.updatePreferences(model: draft.model.isEmpty ? nil : draft.model, systemPrompt: draft.systemPrompt)
+        dismiss()
+    }
+}
+
+struct ConnectionsSettings: View {
+    let store: ChatStore
+    @Binding var draft: ConnectionDraft
+    @Environment(\.palette) private var palette
+
+    var body: some View {
+        Form {
+            Section {
+                TextField("Server URL", text: $draft.baseURL)
+                    .autocorrectionDisabled()
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    .keyboardType(.URL)
+                    #endif
+                SecureField("API key (optional)", text: $draft.apiKey)
+                Button("Connect") { Task { await connect() } }
+                if let parseError = draft.parseError {
+                    Text(parseError).foregroundStyle(.red).font(.callout)
+                }
+                statusRow
+            } header: {
+                Text("Server")
+            } footer: {
+                Text("Examples: 192.168.1.5:1234 (LM Studio), 192.168.1.5:11434 (Ollama), 192.168.1.5:8080 (llama.cpp). \"/v1\" is added when the address has no path.")
+            }
+            .listRowBackground(palette.surface)
+
+            if !store.availableModels.isEmpty {
+                Section("Model") {
+                    Picker("Model", selection: $draft.model) {
+                        ForEach(store.availableModels, id: \.self) { Text($0).tag($0) }
+                    }
+                }
+                .listRowBackground(palette.surface)
+            }
+
+            Section {
+                TextEditor(text: $draft.systemPrompt)
+                    .scrollContentBackground(.hidden)
+                    .frame(minHeight: 100)
+            } header: {
+                Text("System Prompt")
+            } footer: {
+                Text("Sent before every conversation. Leave empty for none.")
+            }
+            .listRowBackground(palette.surface)
+        }
+        .formStyle(.grouped)
+        .foregroundStyle(palette.text)
+        .scrollContentBackground(.hidden)
     }
 
     @ViewBuilder private var statusRow: some View {
         switch store.models {
         case .idle:
-            Label("Not connected", systemImage: "circle.dashed").foregroundStyle(.secondary)
+            Label("Not connected", systemImage: "circle.dashed").foregroundStyle(palette.secondaryText)
         case .loading:
-            HStack { ProgressView(); Text("Connecting…").foregroundStyle(.secondary) }
+            HStack { ProgressView(); Text("Connecting…").foregroundStyle(palette.secondaryText) }
         case .loaded(let ids):
             Label("\(ids.count) model\(ids.count == 1 ? "" : "s")", systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.green)
@@ -88,28 +150,14 @@ struct SettingsView: View {
 
     private func connect() async {
         do {
-            try store.applyServer(baseURL: baseURL, apiKey: apiKey)
-            parseError = nil
-            baseURL = store.baseURLText
+            try store.applyServer(baseURL: draft.baseURL, apiKey: draft.apiKey)
+            draft.parseError = nil
+            draft.baseURL = store.baseURLText
         } catch {
-            parseError = error.localizedDescription
+            draft.parseError = error.localizedDescription
             return
         }
         await store.refreshModels()
-        if store.availableModels.contains(model) == false { model = store.model }
-    }
-
-    private func done() {
-        do {
-            if baseURL != store.baseURLText || apiKey != store.apiKey {
-                try store.applyServer(baseURL: baseURL, apiKey: apiKey)
-                Task { await store.refreshModels() }
-            }
-        } catch {
-            parseError = error.localizedDescription
-            return
-        }
-        store.updatePreferences(model: model.isEmpty ? nil : model, systemPrompt: systemPrompt)
-        dismiss()
+        if store.availableModels.contains(draft.model) == false { draft.model = store.model }
     }
 }
