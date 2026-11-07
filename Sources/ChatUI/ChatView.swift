@@ -5,6 +5,7 @@ struct ChatView: View {
     @Bindable var store: ChatStore
     let conversation: Conversation
     @State private var draft = ""
+    @FocusState private var composerFocused: Bool
     @Environment(\.palette) private var palette
 
     private var live: Conversation { store.selectedConversation ?? conversation }
@@ -18,11 +19,11 @@ struct ChatView: View {
             }
             Composer(draft: $draft, effort: Binding(get: { store.reasoningEffort },
                                                      set: { store.setReasoningEffort($0) }),
-                     streaming: streaming, canSend: store.canSend,
+                     focused: $composerFocused, streaming: streaming, canSend: store.canSend,
                      send: send, stop: store.stop)
         }
         .foregroundStyle(palette.text)
-        .background(palette.background)
+        .background(palette.background.ignoresSafeArea())
         .navigationTitle(live.title)
         .themedNavigationBar()
         #if os(iOS)
@@ -44,6 +45,8 @@ struct ChatView: View {
                 .padding()
             }
             .defaultScrollAnchor(.bottom)
+            .scrollDismissesKeyboard(.interactively)
+            .simultaneousGesture(TapGesture().onEnded { composerFocused = false })
             .overlay {
                 if live.messages.isEmpty {
                     ContentUnavailableView("Start chatting", systemImage: "bubble.left",
@@ -153,6 +156,7 @@ private struct ErrorBanner: View {
 private struct Composer: View {
     @Binding var draft: String
     @Binding var effort: ReasoningEffort?
+    var focused: FocusState<Bool>.Binding
     let streaming: Bool
     let canSend: Bool
     let send: () -> Void
@@ -165,6 +169,7 @@ private struct Composer: View {
                 .padding(.bottom, 8)
             TextField("Message", text: $draft, axis: .vertical)
                 .lineLimit(1...6)
+                .focused(focused)
                 .textFieldStyle(.plain)
                 .padding(.horizontal, 12).padding(.vertical, 8)
                 .foregroundStyle(palette.text)
