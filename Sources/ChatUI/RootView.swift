@@ -50,22 +50,33 @@ private struct Sidebar: View {
     @Bindable var store: ChatStore
     @Environment(\.palette) private var palette
     @Binding var showSettings: Bool
+    /// nil while browsing. A set, possibly empty, while picking chats to delete.
+    @State private var picking: Set<UUID>?
+    @State private var confirmingDelete = false
+
+    private var selection: Binding<Set<UUID>> {
+        Binding(
+            get: { picking ?? Set([store.selection].compactMap { $0 }) },
+            set: { if picking != nil { picking = $0 } else { store.selection = $0.first } }
+        )
+    }
 
     var body: some View {
-        List(selection: $store.selection) {
+        List(selection: selection) {
             ForEach(store.conversations) { conversation in
+                let highlighted = selection.wrappedValue.contains(conversation.id)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(conversation.title).lineLimit(1).foregroundStyle(palette.text)
                     Text(conversation.updatedAt, format: .relative(presentation: .named))
                         .font(.caption)
-                        .foregroundStyle(store.selection == conversation.id ? palette.text.opacity(0.75) : palette.secondaryText)
+                        .foregroundStyle(highlighted ? palette.text.opacity(0.75) : palette.secondaryText)
                 }
                 .tag(conversation.id)
-                .listRowBackground(store.selection == conversation.id ? palette.accent.opacity(0.3) : palette.surface)
+                .listRowBackground(highlighted ? palette.accent.opacity(0.3) : palette.surface)
             }
-            .onDelete { offsets in
+            .onDelete(perform: picking == nil ? { offsets in
                 store.delete(ids: offsets.map { store.conversations[$0].id })
-            }
+            } : nil)
         }
         .scrollContentBackground(.hidden)
         .background(palette.groupedBackground)
@@ -75,14 +86,63 @@ private struct Sidebar: View {
                     .foregroundStyle(palette.secondaryText)
             }
         }
-        .navigationTitle("Chats")
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button("New Chat", systemImage: "square.and.pencil") { store.newConversation() }
+        .navigationTitle(picking.map { $0.isEmpty ? "Select Chats" : "\($0.count) Selected" } ?? "Chats")
+        #if os(iOS)
+        .environment(\.editMode, .constant(picking == nil ? .inactive : .active))
+        #endif
+        .toolbar { toolbar }
+        .confirmationDialog(deleteLabel, isPresented: $confirmingDelete, titleVisibility: .visible) {
+            Button(deleteLabel, role: .destructive) {
+                store.delete(ids: Array(picking ?? []))
+                picking = nil
             }
-            ToolbarItem(placement: .automatic) {
-                Button("Settings", systemImage: "gearshape") { showSettings = true }
-            }
+        } message: {
+            Text("This can't be undone.")
         }
+        .onChange(of: store.conversations.isEmpty) { _, empty in if empty { picking = nil } }
+    }
+
+    private var deleteLabel: String {
+        let count = picking?.count ?? 0
+        return "Delete \(count) Chat\(count == 1 ? "" : "s")"
+    }
+
+    @ToolbarContentBuilder private var toolbar: some ToolbarContent {
+        if picking == nil { browsing } else { pickingToolbar }
+    }
+
+    @ToolbarContentBuilder private var browsing: some ToolbarContent {
+        ToolbarItem(placement: .primaryAction) {
+            Button("New Chat", systemImage: "square.and.pencil") { store.newConversation() }
+        }
+        ToolbarItem(placement: .automatic) {
+            Button("Settings", systemImage: "gearshape") { showSettings = true }
+        }
+        ToolbarItem(placement: .cancellationAction) {
+            Button("Select") { picking = [] }.disabled(store.conversations.isEmpty)
+        }
+    }
+
+    @ToolbarContentBuilder private var pickingToolbar: some ToolbarContent {
+        let all = Set(store.conversations.map(\.id))
+        ToolbarItem(placement: .cancellationAction) {
+            Button(picking == all ? "Deselect All" : "Select All") { picking = picking == all ? [] : all }
+        }
+        ToolbarItem(placement: .confirmationAction) {
+            Button("Done") { picking = nil }
+        }
+        ToolbarItem(placement: deletePlacement) {
+            Button(deleteLabel, role: .destructive) { confirmingDelete = true }
+                .tint(palette.danger)
+                .disabled(picking?.isEmpty ?? true)
+        }
+    }
+
+    private var deletePlacement: ToolbarItemPlacement {
+        #if os(iOS)
+        .bottomBar
+        #else
+        .automatic
+        #endif
     }
 }
