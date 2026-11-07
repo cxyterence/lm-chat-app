@@ -6,6 +6,7 @@ struct ChatView: View {
     let conversation: Conversation
     @State private var draft = ""
     @FocusState private var composerFocused: Bool
+    @State private var atBottom = true
     @Environment(\.palette) private var palette
 
     private var live: Conversation { store.selectedConversation ?? conversation }
@@ -40,12 +41,14 @@ struct ChatView: View {
                             .transition(.opacity.combined(with: .offset(y: 12)))
                     }
                     Color.clear.frame(height: 1).id("bottom")
+                        .onAppear { if !FollowGrowth.supported { atBottom = true } }
+                        .onDisappear { if !FollowGrowth.supported { atBottom = false } }
                 }
                 .padding()
                 .animation(.smooth(duration: 0.35), value: live.messages.count)
             }
             .defaultScrollAnchor(.bottom)
-            .modifier(FollowGrowth())
+            .modifier(FollowGrowth(atBottom: $atBottom))
             .scrollDismissesKeyboard(.interactively)
             .simultaneousGesture(TapGesture().onEnded { composerFocused = false })
             .overlay {
@@ -57,7 +60,17 @@ struct ChatView: View {
                         .foregroundStyle(palette.secondaryText)
                 }
             }
-            .onChange(of: live.messages.last?.content) { if !FollowGrowth.supported { proxy.scrollTo("bottom") } }
+            .overlay(alignment: .bottom) {
+                if !atBottom && !live.messages.isEmpty {
+                    JumpToLatest { withAnimation(.smooth) { proxy.scrollTo("bottom", anchor: .bottom) } }
+                        .padding(.bottom, 12)
+                        .transition(.scale(scale: 0.6).combined(with: .opacity))
+                }
+            }
+            .animation(.snappy(duration: 0.2), value: atBottom)
+            .onChange(of: live.messages.last?.content) {
+                if !FollowGrowth.supported && atBottom { proxy.scrollTo("bottom") }
+            }
             .onChange(of: live.messages.count) { withAnimation(.smooth) { proxy.scrollTo("bottom") } }
         }
     }
@@ -198,18 +211,46 @@ private struct TypingDots: View {
     }
 }
 
-/// Keeps the newest text in view as a reply grows. iOS 17 has no size-change anchor, so it falls back to scrollTo.
+/// Keeps the newest text in view while the reader is at the bottom, and reports whether they are.
+/// iOS 17 has neither the size-change anchor nor scroll geometry, so ChatView falls back to scrollTo and a sentinel row.
 private struct FollowGrowth: ViewModifier {
+    @Binding var atBottom: Bool
+
     static var supported: Bool {
         if #available(iOS 18, macOS 15, *) { true } else { false }
     }
 
     func body(content: Content) -> some View {
         if #available(iOS 18, macOS 15, *) {
-            content.defaultScrollAnchor(.bottom, for: .sizeChanges)
+            content
+                .defaultScrollAnchor(.bottom, for: .sizeChanges)
+                .onScrollGeometryChange(for: Bool.self) { geometry in
+                    geometry.visibleRect.maxY >= geometry.contentSize.height - 60
+                } action: { _, isAtBottom in
+                    atBottom = isAtBottom
+                }
         } else {
             content
         }
+    }
+}
+
+private struct JumpToLatest: View {
+    let action: () -> Void
+    @Environment(\.palette) private var palette
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "arrow.down")
+                .font(.body.weight(.semibold))
+                .foregroundStyle(palette.accent)
+                .frame(width: 40, height: 40)
+                .background(palette.surface, in: Circle())
+                .overlay(Circle().strokeBorder(palette.secondaryText.opacity(0.25), lineWidth: 0.5))
+                .shadow(color: .black.opacity(0.2), radius: 6, y: 2)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Jump to latest")
     }
 }
 
