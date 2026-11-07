@@ -184,12 +184,27 @@ public final class ChatStore {
         if selectedConversation == nil { newConversation() }
         guard let id = selection, let index = conversations.firstIndex(where: { $0.id == id }) else { return }
 
-        if conversations[index].messages.isEmpty {
+        let isFirstPrompt = conversations[index].messages.isEmpty
+        if isFirstPrompt {
             conversations[index].title = Conversation.title(fromFirstUserMessage: trimmed)
         }
         conversations[index].model = model
         conversations[index].messages.append(ChatMessage(role: .user, content: trimmed))
         startStreaming(conversationID: id)
+        if isFirstPrompt { generateTitle(for: id, prompt: trimmed) }
+    }
+
+    /// Runs beside the reply. The first-line title stays if the model gives nothing usable.
+    private func generateTitle(for id: UUID, prompt: String) {
+        guard let config else { return }
+        let client = ChatClient(config: config), model = model
+        Task { [weak self] in
+            guard let title = try? await client.title(model: model, for: prompt),
+                  let self, let index = self.conversations.firstIndex(where: { $0.id == id })
+            else { return }
+            self.conversations[index].title = title
+            self.persist()
+        }
     }
 
     func stop() {

@@ -77,6 +77,10 @@ class Handler(BaseHTTPRequestHandler):
         last_user = next((m["content"] for m in reversed(body.get("messages", []))
                           if m["role"] == "user"), "")
         reply = f"You said: {last_user}"
+        if any(m["role"] == "system" and m["content"].startswith("You name chat conversations")
+               for m in body.get("messages", [])):
+            words = last_user.split("\n\n", 1)[-1].split()[:4]
+            reply = f'Title: "{" ".join(words).title()}."'
         events = script(model, reply)
 
         if not body.get("stream"):

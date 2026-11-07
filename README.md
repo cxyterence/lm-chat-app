@@ -36,9 +36,10 @@ A bare host gets `http://` and `/v1` added. Anything with an explicit scheme or 
 ```sh
 swift run chatcli --base 127.0.0.1:1234 --models
 swift run chatcli --base 127.0.0.1:1234 --model <id> [--key K] [--effort low|medium] "Hello"
+swift run chatcli --base 127.0.0.1:1234 --title "what is NVFP4?"
 ```
 
-Reasoning goes to stderr dimmed, the answer to stdout. Failures exit non-zero.
+Reasoning goes to stderr dimmed, the answer to stdout. Failures exit non-zero. `--title` prints the title the app would give a chat starting with that prompt.
 
 ## Smoke test against your server
 

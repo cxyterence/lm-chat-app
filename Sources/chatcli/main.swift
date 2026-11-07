@@ -6,6 +6,7 @@ struct Options {
     var key = ""
     var model: String?
     var listModels = false
+    var titleOnly = false
     var effort: ReasoningEffort?
     var prompt: String?
 }
@@ -19,7 +20,7 @@ func fail(_ message: String) -> Never {
     exit(1)
 }
 
-let usage = "usage: chatcli --base <url> [--key K] [--model M] [--models] [--effort <\(ReasoningEffort.allCases.map(\.rawValue).joined(separator: "|"))>] \"prompt\""
+let usage = "usage: chatcli --base <url> [--key K] [--model M] [--models] [--title] [--effort <\(ReasoningEffort.allCases.map(\.rawValue).joined(separator: "|"))>] \"prompt\""
 
 func parseOptions(_ args: [String]) -> Options {
     var options = Options()
@@ -40,6 +41,7 @@ func parseOptions(_ args: [String]) -> Options {
             }
             options.effort = effort
         case "--models": options.listModels = true
+        case "--title": options.titleOnly = true
         case "-h", "--help": print(usage); exit(0)
         default: options.prompt = arg
         }
@@ -58,6 +60,11 @@ func run(_ options: Options) async throws {
     }
     guard let prompt = options.prompt else { fail("a prompt is required\n\(usage)") }
     guard let model = options.model ?? models.first else { fail("server lists no models; pass --model") }
+    if options.titleOnly {
+        guard let title = try await client.title(model: model, for: prompt) else { fail("model gave no usable title") }
+        print(title)
+        return
+    }
 
     var wroteReasoning = false
     for try await event in client.stream(
