@@ -45,10 +45,13 @@ private struct ThemeRow: View {
     let theme: Theme
     let selected: Bool
     @Environment(\.palette) private var palette
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         HStack(spacing: 12) {
+            // Native palettes are adaptive; resolve them in the theme's own scheme, not the current one.
             ThemeSwatch(palette: theme.palette)
+                .environment(\.colorScheme, theme.colorScheme ?? colorScheme)
             VStack(alignment: .leading, spacing: 2) {
                 Text(theme.name).foregroundStyle(palette.text)
                 Text(theme.subtitle).font(.caption).foregroundStyle(palette.secondaryText)
