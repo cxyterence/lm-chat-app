@@ -7,6 +7,7 @@ Models:
   mock-ollama     `reasoning` deltas (Ollama style), then content
   mock-think      <think>..</think> inline in content, tags split across chunks
 A prompt starting with "/long" streams a long Markdown reply in irregular bursts, like a real network.
+On mock-reasoning, "/long" streams a long bursty reasoning section first.
 "/spans" streams inline formatting slowly, three characters at a time, to show half-finished spans.
 Set MOCK_API_KEY to require `Authorization: Bearer <key>`.
 """
@@ -134,6 +135,10 @@ class Handler(BaseHTTPRequestHandler):
             pieces = bursty(LONG_REPLY)
             events = [chunk({"content": t}) for t, _ in pieces]
             delays = [d for _, d in pieces]
+            if model == "mock-reasoning":
+                thinking = bursty(LONG_REPLY.replace("#", "").replace("|", " ") * 2, seed=3)
+                events = [chunk({"reasoning_content": t}) for t, _ in thinking] + events
+                delays = [d for _, d in thinking] + delays
 
         if not body.get("stream"):
             content = "".join(e["choices"][0]["delta"].get("content", "") for e in events)

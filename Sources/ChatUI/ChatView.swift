@@ -7,6 +7,7 @@ struct ChatView: View {
     @State private var draft = ""
     @FocusState private var composerFocused: Bool
     @State private var atBottom = true
+    @State private var following = true
     @Environment(\.palette) private var palette
 
     private var live: Conversation { store.selectedConversation ?? conversation }
@@ -41,14 +42,14 @@ struct ChatView: View {
                             .transition(.opacity.combined(with: .offset(y: 12)))
                     }
                     Color.clear.frame(height: 1).id("bottom")
-                        .onAppear { if !FollowGrowth.supported { atBottom = true } }
-                        .onDisappear { if !FollowGrowth.supported { atBottom = false } }
+                        .onAppear { if !FollowStream.supported { atBottom = true } }
+                        .onDisappear { if !FollowStream.supported { atBottom = false } }
                 }
                 .padding()
                 .animation(.smooth(duration: 0.35), value: live.messages.count)
             }
             .defaultScrollAnchor(.bottom)
-            .modifier(FollowGrowth(atBottom: $atBottom))
+            .modifier(FollowStream(atBottom: $atBottom, following: $following) { scrollToBottom(proxy) })
             .scrollDismissesKeyboard(.interactively)
             .simultaneousGesture(TapGesture().onEnded { composerFocused = false })
             .overlay {
@@ -61,18 +62,32 @@ struct ChatView: View {
                 }
             }
             .overlay(alignment: .bottom) {
-                if !atBottom && !live.messages.isEmpty {
-                    JumpToLatest { withAnimation(.smooth) { proxy.scrollTo("bottom", anchor: .bottom) } }
+                if scrolledAway && !live.messages.isEmpty {
+                    JumpToLatest {
+                        following = true
+                        scrollToBottom(proxy)
+                    }
                         .padding(.bottom, 12)
                         .transition(.scale(scale: 0.6).combined(with: .opacity))
                 }
             }
-            .animation(.snappy(duration: 0.2), value: atBottom)
+            .animation(.snappy(duration: 0.2), value: scrolledAway)
             .onChange(of: live.messages.last?.content) {
-                if !FollowGrowth.supported && atBottom { proxy.scrollTo("bottom") }
+                if !FollowStream.supported && atBottom { proxy.scrollTo("bottom") }
             }
-            .onChange(of: live.messages.count) { withAnimation(.smooth) { proxy.scrollTo("bottom") } }
+            .onChange(of: live.messages.count) {
+                following = true
+                scrollToBottom(proxy)
+            }
         }
+    }
+
+    /// The reader moved away from the newest text. Being briefly off the bottom during an eased scroll doesn't count.
+    private var scrolledAway: Bool { FollowStream.supported ? !following : !atBottom }
+
+    /// Matches the reply bubble's height easing so a new line and the scroll move together.
+    private func scrollToBottom(_ proxy: ScrollViewProxy) {
+        withAnimation(.smooth(duration: 0.25)) { proxy.scrollTo("bottom", anchor: .bottom) }
     }
 
     private func send() {
@@ -117,7 +132,7 @@ private struct AssistantBubble: View {
 
     private var thinkingExpanded: Binding<Bool> {
         Binding(
-            get: { thinkingOverride ?? (isStreaming && message.content.isEmpty) },
+            get: { thinkingOverride ?? false },
             set: { thinkingOverride = $0 }
         )
     }
@@ -125,7 +140,7 @@ private struct AssistantBubble: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if !message.reasoning.isEmpty {
-                DisclosureGroup("Thinking", isExpanded: thinkingExpanded) {
+                DisclosureGroup(isExpanded: thinkingExpanded) {
                     Paced(text: message.reasoning, live: isStreaming) { text, _ in
                         Text(text)
                             .font(.callout)
@@ -133,6 +148,9 @@ private struct AssistantBubble: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .textSelection(.enabled)
                     }
+                } label: {
+                    ThinkingLabel(reasoning: message.reasoning,
+                                  live: isStreaming && message.content.isEmpty && !thinkingExpanded.wrappedValue)
                 }
                 .font(.subheadline)
                 .foregroundStyle(palette.secondaryText)
@@ -195,6 +213,27 @@ private struct Paced<Content: View>: View {
     }
 }
 
+/// Collapsed by default. While the model is still thinking it previews the newest line, so the block keeps
+/// a fixed height instead of expanding and then collapsing under the reader when the answer starts.
+private struct ThinkingLabel: View {
+    let reasoning: String
+    let live: Bool
+    @Environment(\.palette) private var palette
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(live ? "Thinking…" : "Thinking")
+            if live {
+                Text(reasoning.suffix(160).replacingOccurrences(of: "\n", with: " "))
+                    .font(.caption)
+                    .lineLimit(1)
+                    .truncationMode(.head)
+                    .foregroundStyle(palette.secondaryText.opacity(0.8))
+            }
+        }
+    }
+}
+
 private struct TypingDots: View {
     @Environment(\.palette) private var palette
 
@@ -216,10 +255,14 @@ private struct TypingDots: View {
     }
 }
 
-/// Keeps the newest text in view while the reader is at the bottom, and reports whether they are.
-/// iOS 17 has neither the size-change anchor nor scroll geometry, so ChatView falls back to scrollTo and a sentinel row.
-private struct FollowGrowth: ViewModifier {
+/// Follows a growing reply until the reader drags the list, and resumes once they are back at the bottom.
+/// Following is explicit state rather than a size-change anchor, because an anchor only holds while the
+/// view is exactly at the bottom and one animated scroll that ends short loses it for the rest of the reply.
+/// iOS 17 lacks scroll geometry and phases, so ChatView falls back to a sentinel row and scrollTo.
+private struct FollowStream: ViewModifier {
     @Binding var atBottom: Bool
+    @Binding var following: Bool
+    let scrollToBottom: () -> Void
 
     static var supported: Bool {
         if #available(iOS 18, macOS 15, *) { true } else { false }
@@ -228,11 +271,22 @@ private struct FollowGrowth: ViewModifier {
     func body(content: Content) -> some View {
         if #available(iOS 18, macOS 15, *) {
             content
-                .defaultScrollAnchor(.bottom, for: .sizeChanges)
                 .onScrollGeometryChange(for: Bool.self) { geometry in
                     geometry.visibleRect.maxY >= geometry.contentSize.height - 60
                 } action: { _, isAtBottom in
                     atBottom = isAtBottom
+                }
+                .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                    geometry.contentSize.height - geometry.containerSize.height
+                } action: { old, new in
+                    if following && new != old { scrollToBottom() }
+                }
+                .onScrollPhaseChange { _, phase in
+                    switch phase {
+                    case .interacting: following = false
+                    case .idle: if atBottom { following = true }
+                    default: break
+                    }
                 }
         } else {
             content
