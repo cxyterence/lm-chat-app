@@ -9,6 +9,7 @@ Connection is two inputs: a URL and an optional API key.
 - `Sources/ChatCore` Foundation-only client, SSE decoding, `<think>` splitting, persistence.
 - `Sources/ChatUI` SwiftUI views and `ChatStore`. Public entry point is `RootView`.
 - `Sources/chatcli` command-line client built on ChatCore.
+- `Sources/uisnapshot` macOS-only tool that renders every theme to PNGs: `swift run uisnapshot <outdir>`.
 - `App/` the only code in the Xcode app target.
 - `scripts/mock_openai_server.py` stdlib mock server for offline testing.
 

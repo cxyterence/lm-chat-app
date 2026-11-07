@@ -13,6 +13,8 @@ let package = Package(
         .target(name: "ChatCore"),
         .target(name: "ChatUI", dependencies: ["ChatCore"]),
         .executableTarget(name: "chatcli", dependencies: ["ChatCore"]),
+        .executableTarget(name: "uisnapshot", dependencies: ["ChatUI"]),
         .testTarget(name: "ChatCoreTests", dependencies: ["ChatCore"]),
+        .testTarget(name: "ChatUITests", dependencies: ["ChatUI", "ChatCore"]),
     ]
 )
