@@ -195,3 +195,128 @@ private struct Parser {
             .map { $0.trimmingCharacters(in: .whitespaces) }
     }
 }
+
+extension Markdown {
+    /// Makes a reply that is still arriving render as it will once finished: closes bold, italic,
+    /// strikethrough and code spans opened on the last line, shows an unfinished link as its text, and hides
+    /// a marker or fence that has only just started. Text inside an open code block is left alone.
+    public static func completingPartial(_ text: String) -> String {
+        var lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        guard let last = lines.popLast() else { return text }
+        let head = lines.isEmpty ? "" : lines.joined(separator: "\n") + "\n"
+
+        let fences = lines.filter {
+            let line = $0.trimmingCharacters(in: .whitespaces)
+            return line.hasPrefix("```") || line.hasPrefix("~~~")
+        }
+        if fences.count % 2 == 1 { return text }
+
+        let trimmedLast = last.trimmingCharacters(in: .whitespaces)
+        if trimmedLast.hasPrefix("```") || (!trimmedLast.isEmpty && trimmedLast.allSatisfy { $0 == "`" }) {
+            return head.hasSuffix("\n") ? String(head.dropLast()) : head
+        }
+
+        let completed = completingLine(last)
+        return completed == last ? text : head + completed
+    }
+
+    private enum OpenSpan: Equatable {
+        case strong, emphasis, strike, code, link
+
+        var closer: String {
+            switch self {
+            case .strong: "**"
+            case .emphasis: "*"
+            case .strike: "~~"
+            case .code: "`"
+            case .link: ""
+            }
+        }
+    }
+
+    private static func completingLine(_ line: String) -> String {
+        let chars = Array(line)
+        var out: [Character] = []
+        var stack: [(span: OpenSpan, at: Int)] = []
+        var i = 0
+
+        func opensAfter(_ end: Int) -> Bool { end < chars.count && !chars[end].isWhitespace }
+
+        scan: while i < chars.count {
+            let c = chars[i]
+            if stack.last?.span == .code {
+                out.append(c)
+                if c == "`" { stack.removeLast() }
+                i += 1
+                continue
+            }
+            switch c {
+            case "`":
+                guard i + 1 < chars.count else { i += 1; continue }
+                stack.append((.code, out.count))
+                out.append(c)
+                i += 1
+            case "*":
+                var run = chars[i...].prefix { $0 == "*" }.count
+                let end = i + run
+                while run > 0 {
+                    if stack.last?.span == .strong, run >= 2 {
+                        stack.removeLast(); out += "**"; run -= 2
+                    } else if stack.last?.span == .emphasis {
+                        stack.removeLast(); out += "*"; run -= 1
+                    } else if end == chars.count {
+                        run = 0
+                    } else if opensAfter(end) {
+                        let span: OpenSpan = run >= 2 ? .strong : .emphasis
+                        stack.append((span, out.count))
+                        out += span.closer
+                        run -= span.closer.count
+                    } else {
+                        out += String(repeating: "*", count: run)
+                        run = 0
+                    }
+                }
+                i = end
+            case "~" where i + 1 < chars.count && chars[i + 1] == "~":
+                if stack.last?.span == .strike {
+                    stack.removeLast(); out += "~~"
+                } else if opensAfter(i + 2) {
+                    stack.append((.strike, out.count)); out += "~~"
+                } else if i + 2 < chars.count {
+                    out += "~~"
+                }
+                i += 2
+            case "[":
+                stack.append((.link, out.count))
+                out.append(c)
+                i += 1
+            case "]" where stack.last?.span == .link:
+                let open = stack.removeLast().at
+                if i + 1 == chars.count {
+                    out.remove(at: open)
+                    break scan
+                }
+                guard chars[i + 1] == "(" else {
+                    out.append(c); i += 1; continue
+                }
+                guard let close = chars[(i + 2)...].firstIndex(of: ")") else {
+                    out.remove(at: open)
+                    break scan
+                }
+                out += chars[i...close]
+                i = close + 1
+            default:
+                out.append(c)
+                i += 1
+            }
+        }
+
+        for open in stack.reversed() where open.span == .link { out.remove(at: open.at) }
+        var result = String(out)
+        let closers = stack.reversed().map(\.span.closer).joined()
+        if !closers.isEmpty || result != line {
+            while result.last?.isWhitespace == true { result.removeLast() }
+        }
+        return result + closers
+    }
+}

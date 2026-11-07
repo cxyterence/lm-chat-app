@@ -7,6 +7,7 @@ Models:
   mock-ollama     `reasoning` deltas (Ollama style), then content
   mock-think      <think>..</think> inline in content, tags split across chunks
 A prompt starting with "/long" streams a long Markdown reply in irregular bursts, like a real network.
+"/spans" streams inline formatting slowly, three characters at a time, to show half-finished spans.
 Set MOCK_API_KEY to require `Authorization: Bearer <key>`.
 """
 import argparse
@@ -60,6 +61,11 @@ w_q = quantize(w, fmt="nvfp4", block=16)
 ```
 
 That is the whole idea. Smaller blocks cost a little more metadata but track the data much more closely, which is why NVFP4 holds up where plain INT4 starts to drift.
+"""
+
+
+SPANS_REPLY = """Use **bold claims** sparingly, *italic asides* when useful, and `inline_code()` for names.
+Read [the NVFP4 guide](https://example.com/nvfp4) and ~~old advice~~ the **newest `kernel` notes**.
 """
 
 
@@ -120,7 +126,11 @@ class Handler(BaseHTTPRequestHandler):
             reply = f'Title: "{" ".join(words).title()}."'
         events = script(model, reply)
         delays = [0.03] * len(events)
-        if last_user.strip().startswith("/long"):
+        if last_user.strip().startswith("/spans"):
+            pieces = [(SPANS_REPLY[i:i + 3], 0.06) for i in range(0, len(SPANS_REPLY), 3)]
+            events = [chunk({"content": t}) for t, _ in pieces]
+            delays = [d for _, d in pieces]
+        elif last_user.strip().startswith("/long"):
             pieces = bursty(LONG_REPLY)
             events = [chunk({"content": t}) for t, _ in pieces]
             delays = [d for _, d in pieces]

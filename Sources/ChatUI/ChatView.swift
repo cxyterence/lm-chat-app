@@ -126,7 +126,7 @@ private struct AssistantBubble: View {
         VStack(alignment: .leading, spacing: 8) {
             if !message.reasoning.isEmpty {
                 DisclosureGroup("Thinking", isExpanded: thinkingExpanded) {
-                    Paced(text: message.reasoning, live: isStreaming) { text in
+                    Paced(text: message.reasoning, live: isStreaming) { text, _ in
                         Text(text)
                             .font(.callout)
                             .foregroundStyle(palette.secondaryText)
@@ -138,8 +138,10 @@ private struct AssistantBubble: View {
                 .foregroundStyle(palette.secondaryText)
             }
             if !message.content.isEmpty {
-                Paced(text: message.content, live: isStreaming) { text in
-                    MarkdownView(text: text).foregroundStyle(palette.text).textSelection(.enabled)
+                Paced(text: message.content, live: isStreaming) { text, unfinished in
+                    MarkdownView(text: unfinished ? Markdown.completingPartial(text) : text)
+                        .foregroundStyle(palette.text)
+                        .textSelection(.enabled)
                 }
             } else if isStreaming && message.reasoning.isEmpty {
                 TypingDots().transition(.opacity)
@@ -154,18 +156,21 @@ private struct AssistantBubble: View {
 /// Reveals streamed text at a steady pace. Text that existed before the view appeared shows at once.
 private struct Paced<Content: View>: View {
     let text: String
-    @ViewBuilder let content: (String) -> Content
+    let live: Bool
+    /// Receives the visible text and whether it is still unfinished (streaming, or not yet fully revealed).
+    @ViewBuilder let content: (String, Bool) -> Content
     @State private var shown: Int?
     @State private var height: CGFloat?
 
-    init(text: String, live: Bool, @ViewBuilder content: @escaping (String) -> Content) {
+    init(text: String, live: Bool, @ViewBuilder content: @escaping (String, Bool) -> Content) {
         self.text = text
+        self.live = live
         self.content = content
         _shown = State(initialValue: live ? 0 : nil)
     }
 
     var body: some View {
-        content(shown.map { String(text.prefix($0)) } ?? text)
+        content(shown.map { String(text.prefix($0)) } ?? text, live || (shown ?? text.count) < text.count)
             .fixedSize(horizontal: false, vertical: true)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { newHeight in
                 guard shown != nil, height != nil else { height = newHeight; return }
