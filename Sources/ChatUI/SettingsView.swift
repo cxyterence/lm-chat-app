@@ -1,11 +1,17 @@
 import ChatCore
 import SwiftUI
 
-enum SettingsTab: String, CaseIterable, Identifiable {
+enum SettingsPage: String, CaseIterable, Identifiable {
     case connections, appearance
 
-    var id: String { rawValue }
+    var id: Self { self }
     var title: String { rawValue.capitalized }
+    var systemImage: String {
+        switch self {
+        case .connections: "network"
+        case .appearance: "paintpalette"
+        }
+    }
 }
 
 struct ConnectionDraft {
@@ -18,41 +24,44 @@ struct ConnectionDraft {
 
 struct SettingsView: View {
     let store: ChatStore
-    @AppStorage private var tab: SettingsTab
+    @State private var path: [SettingsPage]
+    @State private var draft = ConnectionDraft()
     @Environment(\.dismiss) private var dismiss
     @Environment(\.palette) private var palette
-    @State private var draft = ConnectionDraft()
 
-    init(store: ChatStore) {
+    init(store: ChatStore, page: SettingsPage? = nil) {
         self.store = store
-        _tab = AppStorage(wrappedValue: .connections, "settingsTab", store: store.defaults)
+        _path = State(initialValue: page.map { [$0] } ?? [])
     }
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                Picker("Settings", selection: $tab) {
-                    ForEach(SettingsTab.allCases) { Text($0.title).tag($0) }
+        NavigationStack(path: $path) {
+            List(SettingsPage.allCases) { page in
+                NavigationLink(value: page) {
+                    Label {
+                        HStack {
+                            Text(page.title).foregroundStyle(palette.text)
+                            Spacer()
+                            Text(summary(page)).foregroundStyle(palette.secondaryText).lineLimit(1)
+                        }
+                    } icon: {
+                        Image(systemName: page.systemImage).foregroundStyle(palette.accent)
+                    }
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .padding()
-
-                switch tab {
-                case .connections: ConnectionsSettings(store: store, draft: $draft)
-                case .appearance: AppearanceSettings(store: store)
-                }
+                .listRowBackground(palette.surface)
             }
+            .scrollContentBackground(.hidden)
             .background(palette.groupedBackground)
-            .navigationTitle("Settings")
-            .themedNavigationBar()
-            #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-            #endif
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { done() }
+            .modifier(SettingsChrome(title: "Settings", done: done))
+            .navigationDestination(for: SettingsPage.self) { page in
+                Group {
+                    switch page {
+                    case .connections: ConnectionsSettings(store: store, draft: $draft)
+                    case .appearance: AppearanceSettings(store: store)
+                    }
                 }
+                .background(palette.groupedBackground)
+                .modifier(SettingsChrome(title: page.title, done: done))
             }
         }
         #if os(macOS)
@@ -66,6 +75,13 @@ struct SettingsView: View {
         }
     }
 
+    private func summary(_ page: SettingsPage) -> String {
+        switch page {
+        case .connections: store.config?.baseURL.host() ?? "Not set"
+        case .appearance: store.theme.name
+        }
+    }
+
     private func done() {
         do {
             if draft.baseURL != store.baseURLText || draft.apiKey != store.apiKey {
@@ -74,11 +90,27 @@ struct SettingsView: View {
             }
         } catch {
             draft.parseError = error.localizedDescription
-            tab = .connections
+            path = [.connections]
             return
         }
         store.updatePreferences(model: draft.model.isEmpty ? nil : draft.model, systemPrompt: draft.systemPrompt)
         dismiss()
+    }
+}
+
+private struct SettingsChrome: ViewModifier {
+    let title: String
+    let done: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .navigationTitle(title)
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("Done", action: done) }
+            }
     }
 }
 

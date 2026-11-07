@@ -30,10 +30,10 @@ public enum UISnapshot {
 
             try write(RootView(store: store), size: chatSize, appearance: appearance,
                       to: directory.appendingPathComponent("\(theme.rawValue)-chat.png"))
-            for tab in SettingsTab.allCases {
-                defaults.set(tab.rawValue, forKey: "settingsTab")
-                try write(SettingsView(store: store).theme(theme), size: settingsSize, appearance: appearance,
-                          to: directory.appendingPathComponent("\(theme.rawValue)-settings-\(tab.rawValue).png"))
+            let pages: [(String, SettingsPage?)] = [("root", nil)] + SettingsPage.allCases.map { ($0.rawValue, $0) }
+            for (name, page) in pages {
+                try write(SettingsView(store: store, page: page).theme(theme), size: settingsSize, appearance: appearance,
+                          to: directory.appendingPathComponent("\(theme.rawValue)-settings-\(name).png"))
             }
         }
     }

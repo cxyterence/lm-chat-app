@@ -25,11 +25,13 @@ struct AppearanceSettings: View {
                             .background(palette.accent, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                             .foregroundStyle(palette.onAccent)
                     }
-                    HStack {
-                        Text("Looks good. Pick the **\(store.theme.name)** theme any time.")
-                            .foregroundStyle(palette.text)
-                        Spacer(minLength: 48)
-                    }
+                    MarkdownView(text: """
+                        ### \(store.theme.name)
+                        Looks **good**, *really*. Try `chatcli` or read [the docs](https://example.com).
+                        - Pick another theme any time
+                        """)
+                        .foregroundStyle(palette.text)
+                        .padding(.trailing, 48)
                 }
                 .padding(.vertical, 4)
             }
