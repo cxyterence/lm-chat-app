@@ -46,7 +46,8 @@ Reasoning goes to stderr dimmed, the answer to stdout. Failures exit non-zero. `
 
 ```sh
 cp .env.example .env   # set LLM_BASE_URI, optionally LLM_API_KEY and LLM_MODEL
-scripts/smoke.sh
+scripts/smoke.sh          # your server
+scripts/smoke.sh openai   # OpenAI, using OPENAI_API_KEY and OPENAI_MODEL
 ```
 
 It lists the server's models and streams one reply through `chatcli`. `.env` is git-ignored.
