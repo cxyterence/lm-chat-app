@@ -2,7 +2,7 @@ import Foundation
 
 public struct ChatClient: Sendable {
     public let config: ServerConfig
-    private let session: URLSession
+    let session: URLSession
 
     public init(config: ServerConfig, session: URLSession = .shared) {
         self.config = config
@@ -103,13 +103,13 @@ public struct ChatClient: Sendable {
         return request
     }
 
-    private func authorize(_ request: inout URLRequest) {
+    func authorize(_ request: inout URLRequest) {
         if let key = config.apiKey {
             request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         }
     }
 
-    private static func httpError(status: Int, body: Data) -> ChatClientError {
+    static func httpError(status: Int, body: Data) -> ChatClientError {
         if let envelope = try? JSONDecoder().decode(WireErrorEnvelope.self, from: body) {
             return .http(status: status, message: envelope.message)
         }

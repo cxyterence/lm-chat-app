@@ -413,16 +413,6 @@ private struct ModelPanel: View {
     let store: ChatStore
     @Environment(\.palette) private var palette
 
-    /// Slider positions, ordered by how much the model thinks. nil omits the field, which is the server's own default.
-    private static let detents: [ReasoningEffort?] = [.low, .medium, nil]
-
-    private var detent: Binding<Double> {
-        Binding(
-            get: { Double(Self.detents.firstIndex(of: store.reasoningEffort) ?? Self.detents.count - 1) },
-            set: { store.setReasoningEffort(Self.detents[Int($0.rounded())]) }
-        )
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
@@ -436,37 +426,48 @@ private struct ModelPanel: View {
                 ScrollView { modelList }.frame(maxHeight: 240)
             }
             Divider().overlay(palette.secondaryText.opacity(0.3))
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Reasoning effort").font(.headline)
-                    Spacer()
-                    Text(store.reasoningEffort?.rawValue.capitalized ?? "Server default")
-                        .foregroundStyle(palette.accent)
-                        .contentTransition(.numericText())
-                        .animation(.snappy, value: store.reasoningEffort)
-                }
-                Slider(value: detent, in: 0...Double(Self.detents.count - 1), step: 1)
-                    .accessibilityLabel("Reasoning effort")
-                    .accessibilityValue(store.reasoningEffort?.rawValue.capitalized ?? "Server default")
-                HStack {
-                    Text("Low")
-                    Spacer()
-                    Text("Medium")
-                    Spacer()
-                    Text("Server default")
-                }
-                .font(.caption)
-                .foregroundStyle(palette.secondaryText)
-                Text("Lower effort answers sooner. Server default leaves the choice to the server.")
-                    .font(.caption2)
-                    .foregroundStyle(palette.secondaryText)
-            }
+            effortSection
         }
         .padding()
         .frame(width: 320)
         .foregroundStyle(palette.text)
-        .presentationBackground(palette.surface)
         .sensoryFeedback(.selection, trigger: store.reasoningEffort)
+    }
+
+    @ViewBuilder private var effortSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Reasoning effort").font(.headline)
+                Spacer()
+                effortStatus
+            }
+            if case .known(let levels) = store.effortLevels, levels.count > 1, let selection = store.reasoningEffort {
+                EffortSlider(levels: levels, selection: selection, select: store.setReasoningEffort)
+            } else if store.effortLevels == .checking {
+                Capsule().fill(palette.secondaryText.opacity(0.12)).frame(height: EffortSlider.trackHeight)
+            }
+        }
+        .animation(.snappy, value: store.effortLevels)
+    }
+
+    @ViewBuilder private var effortStatus: some View {
+        switch store.effortLevels {
+        case .checking:
+            ProgressView().accessibilityLabel("Checking effort levels")
+        case .failed:
+            Button("Retry", systemImage: "arrow.clockwise", action: store.checkEffortLevels)
+                .font(.callout)
+                .accessibilityLabel("Retry checking effort levels")
+        case .known(let levels):
+            if let effort = store.reasoningEffort {
+                Text(effort.label)
+                    .foregroundStyle(levels.count > 1 ? palette.accent : palette.secondaryText)
+                    .contentTransition(.numericText())
+                    .animation(.snappy, value: effort)
+            } else {
+                Text("Not adjustable").foregroundStyle(palette.secondaryText)
+            }
+        }
     }
 
     @ViewBuilder private var modelList: some View {
@@ -488,6 +489,85 @@ private struct ModelPanel: View {
                 }
                 .buttonStyle(.plain)
             }
+        }
+    }
+}
+
+/// A capsule track holding a round knob that snaps to one dot per level, with each label centred under its dot.
+private struct EffortSlider: View {
+    static let trackHeight: CGFloat = 34
+    private static let inset: CGFloat = 3
+
+    let levels: [ReasoningEffort]
+    let selection: ReasoningEffort
+    let select: (ReasoningEffort) -> Void
+    @Environment(\.palette) private var palette
+    @State private var dragX: CGFloat?
+
+    private var selectedIndex: Int { levels.firstIndex(of: selection) ?? 0 }
+
+    var body: some View {
+        GeometryReader { geometry in
+            let width = geometry.size.width
+            ZStack(alignment: .topLeading) {
+                Capsule()
+                    .fill(palette.secondaryText.opacity(0.15))
+                    .frame(height: Self.trackHeight)
+                ForEach(levels.indices, id: \.self) { index in
+                    Circle()
+                        .fill(palette.secondaryText.opacity(0.5))
+                        .frame(width: 5, height: 5)
+                        .position(x: x(index, width), y: Self.trackHeight / 2)
+                    Text(levels[index].label)
+                        .font(.caption)
+                        .foregroundStyle(index == selectedIndex ? palette.accent : palette.secondaryText)
+                        .fixedSize()
+                        .position(x: x(index, width), y: Self.trackHeight + 14)
+                }
+                Circle()
+                    .fill(palette.accent)
+                    .shadow(color: .black.opacity(0.2), radius: 3, y: 1)
+                    .frame(width: Self.trackHeight - 2 * Self.inset, height: Self.trackHeight - 2 * Self.inset)
+                    .position(x: dragX ?? x(selectedIndex, width), y: Self.trackHeight / 2)
+            }
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { drag in
+                        let lo = x(0, width), hi = x(levels.count - 1, width)
+                        dragX = min(max(drag.location.x, lo), hi)
+                        let nearest = Int(((dragX! - lo) / step(width)).rounded())
+                        if levels[nearest] != selection { select(levels[nearest]) }
+                    }
+                    .onEnded { _ in withAnimation(.snappy) { dragX = nil } }
+            )
+        }
+        .frame(height: Self.trackHeight + 24)
+        .animation(.snappy, value: selection)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Reasoning effort")
+        .accessibilityValue(selection.label)
+        .accessibilityAdjustableAction { direction in
+            let index = selectedIndex + (direction == .increment ? 1 : -1)
+            if levels.indices.contains(index) { select(levels[index]) }
+        }
+    }
+
+    private func step(_ width: CGFloat) -> CGFloat {
+        (width - Self.trackHeight) / CGFloat(levels.count - 1)
+    }
+
+    private func x(_ index: Int, _ width: CGFloat) -> CGFloat {
+        Self.trackHeight / 2 + CGFloat(index) * step(width)
+    }
+}
+
+private extension ReasoningEffort {
+    var label: String {
+        switch self {
+        case .none: "Off"
+        case .xhigh: "X-High"
+        default: rawValue.capitalized
         }
     }
 }

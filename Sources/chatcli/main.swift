@@ -7,6 +7,7 @@ struct Options {
     var model: String?
     var listModels = false
     var titleOnly = false
+    var listEfforts = false
     var effort: ReasoningEffort?
     var prompt: String?
 }
@@ -20,7 +21,7 @@ func fail(_ message: String) -> Never {
     exit(1)
 }
 
-let usage = "usage: chatcli --base <url> [--key K] [--model M] [--models] [--title] [--effort <\(ReasoningEffort.allCases.map(\.rawValue).joined(separator: "|"))>] \"prompt\""
+let usage = "usage: chatcli --base <url> [--key K] [--model M] [--models] [--efforts] [--title] [--effort <\(ReasoningEffort.allCases.map(\.rawValue).joined(separator: "|"))>] \"prompt\""
 
 func parseOptions(_ args: [String]) -> Options {
     var options = Options()
@@ -42,6 +43,7 @@ func parseOptions(_ args: [String]) -> Options {
             options.effort = effort
         case "--models": options.listModels = true
         case "--title": options.titleOnly = true
+        case "--efforts": options.listEfforts = true
         case "-h", "--help": print(usage); exit(0)
         default: options.prompt = arg
         }
@@ -58,8 +60,13 @@ func run(_ options: Options) async throws {
         models.forEach { print($0) }
         return
     }
-    guard let prompt = options.prompt else { fail("a prompt is required\n\(usage)") }
     guard let model = options.model ?? models.first else { fail("server lists no models; pass --model") }
+    if options.listEfforts {
+        let levels = try await client.reasoningEfforts(model: model)
+        print(levels.isEmpty ? "(not adjustable)" : levels.map(\.rawValue).joined(separator: " "))
+        return
+    }
+    guard let prompt = options.prompt else { fail("a prompt is required\n\(usage)") }
     if options.titleOnly {
         guard let title = try await client.title(model: model, for: prompt) else { fail("model gave no usable title") }
         print(title)

@@ -35,11 +35,12 @@ A bare host gets `http://` and `/v1` added. Anything with an explicit scheme or 
 
 ```sh
 swift run chatcli --base 127.0.0.1:1234 --models
-swift run chatcli --base 127.0.0.1:1234 --model <id> [--key K] [--effort low|medium] "Hello"
+swift run chatcli --base 127.0.0.1:1234 --model <id> [--key K] [--effort low] "Hello"
+swift run chatcli --base 127.0.0.1:1234 --model <id> --efforts
 swift run chatcli --base 127.0.0.1:1234 --title "what is NVFP4?"
 ```
 
-Reasoning goes to stderr dimmed, the answer to stdout. Failures exit non-zero. `--title` prints the title the app would give a chat starting with that prompt.
+Reasoning goes to stderr dimmed, the answer to stdout. Failures exit non-zero. `--title` prints the title the app would give a chat starting with that prompt. `--efforts` prints the reasoning effort levels the model accepts, the same check the app runs before showing its effort slider.
 
 ## Smoke test against your server
 

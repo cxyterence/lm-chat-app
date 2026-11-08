@@ -20,6 +20,8 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MODELS = ["mock-chat", "mock-reasoning", "mock-ollama", "mock-think"]
+# Like vLLM with the user's template. Other models ignore reasoning_effort, as llama.cpp does.
+EFFORTS = {"mock-reasoning": {"none", "low", "medium", "xhigh"}}
 
 
 def chunk(delta, finish=None):
@@ -119,6 +121,9 @@ class Handler(BaseHTTPRequestHandler):
         model = body.get("model", "mock-chat")
         if model not in MODELS:
             return self.send_json(404, {"error": {"message": f"model '{model}' not found"}})
+        effort = body.get("reasoning_effort")
+        if effort is not None and model in EFFORTS and effort not in EFFORTS[model]:
+            return self.send_json(400, {"error": {"message": f"Unexpected reasoning effort {effort}."}})
         last_user = next((m["content"] for m in reversed(body.get("messages", []))
                           if m["role"] == "user"), "")
         reply = f"You said: {last_user}"

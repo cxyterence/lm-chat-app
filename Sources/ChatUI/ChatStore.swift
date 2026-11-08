@@ -28,6 +28,13 @@ public final class ChatStore {
         case failed(String)
     }
 
+    /// The effort levels the selected model accepts, as the server reported them.
+    enum EffortLevels: Equatable {
+        case checking
+        case known([ReasoningEffort])
+        case failed
+    }
+
     private enum Keys {
         static let baseURL = "baseURL"
         static let model = "model"
@@ -43,7 +50,8 @@ public final class ChatStore {
     private(set) var apiKey: String
     private(set) var model: String
     private(set) var systemPrompt: String
-    private(set) var reasoningEffort: ReasoningEffort?
+    private var preferredEffort: ReasoningEffort?
+    private(set) var effortLevels: EffortLevels = .checking
     private(set) var theme: Theme
     private(set) var models: ModelsState = .idle
     private(set) var generation: Generation = .idle
@@ -51,6 +59,7 @@ public final class ChatStore {
     private(set) var persistenceError: String?
 
     @ObservationIgnored let defaults: UserDefaults
+    @ObservationIgnored private var effortCheck: Task<Void, Never>?
     @ObservationIgnored private let fileURL: URL
 
     public convenience init() {
@@ -63,7 +72,7 @@ public final class ChatStore {
         baseURLText = defaults.string(forKey: Keys.baseURL) ?? ""
         model = defaults.string(forKey: Keys.model) ?? ""
         systemPrompt = defaults.string(forKey: Keys.systemPrompt) ?? ""
-        reasoningEffort = defaults.string(forKey: Keys.reasoningEffort).flatMap(ReasoningEffort.init(rawValue:))
+        preferredEffort = defaults.string(forKey: Keys.reasoningEffort).flatMap(ReasoningEffort.init(rawValue:))
         theme = defaults.string(forKey: Keys.theme).flatMap(Theme.init(rawValue:)) ?? .system
         self.apiKey = apiKey ?? Keychain.get(Keys.apiKey) ?? ""
         do {
@@ -104,9 +113,10 @@ public final class ChatStore {
     }
 
     func updatePreferences(model: String? = nil, systemPrompt: String? = nil) {
-        if let model {
+        if let model, model != self.model {
             self.model = model
             defaults.set(model, forKey: Keys.model)
+            checkEffortLevels()
         }
         if let systemPrompt {
             self.systemPrompt = systemPrompt
@@ -114,12 +124,34 @@ public final class ChatStore {
         }
     }
 
-    func setReasoningEffort(_ effort: ReasoningEffort?) {
-        reasoningEffort = effort
-        if let effort {
-            defaults.set(effort.rawValue, forKey: Keys.reasoningEffort)
-        } else {
-            defaults.removeObject(forKey: Keys.reasoningEffort)
+    /// What a request sends. Until the levels are known it's the saved choice, which the server accepted before.
+    var reasoningEffort: ReasoningEffort? {
+        guard case .known(let levels) = effortLevels else { return preferredEffort }
+        return ReasoningEffort.choice(preferred: preferredEffort, supported: levels)
+    }
+
+    func setReasoningEffort(_ effort: ReasoningEffort) {
+        preferredEffort = effort
+        defaults.set(effort.rawValue, forKey: Keys.reasoningEffort)
+    }
+
+    func checkEffortLevels() {
+        effortCheck?.cancel()
+        guard let config, !model.isEmpty else {
+            effortLevels = .failed
+            return
+        }
+        let model = model
+        effortLevels = .checking
+        effortCheck = Task {
+            let result: EffortLevels
+            do {
+                result = .known(try await ChatClient(config: config).reasoningEfforts(model: model))
+            } catch {
+                result = .failed
+            }
+            guard !Task.isCancelled, model == self.model else { return }
+            effortLevels = result
         }
     }
 
@@ -139,9 +171,12 @@ public final class ChatStore {
             models = .loaded(ids)
             if !ids.contains(model), let first = ids.first {
                 updatePreferences(model: first)
+            } else {
+                checkEffortLevels()
             }
         } catch {
             models = .failed(error.localizedDescription)
+            effortLevels = .failed
         }
     }
 

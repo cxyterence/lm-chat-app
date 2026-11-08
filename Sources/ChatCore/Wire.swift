@@ -17,6 +17,20 @@ struct WireChatRequest: Encodable {
     }
 }
 
+struct WireProbeRequest: Encodable {
+    let model: String
+    let messages = [WireMessage(role: .user, content: "hi")]
+    let maxTokens = 1
+    let stream = false
+    let reasoningEffort: String
+
+    enum CodingKeys: String, CodingKey {
+        case model, messages, stream
+        case maxTokens = "max_tokens"
+        case reasoningEffort = "reasoning_effort"
+    }
+}
+
 struct WireChunk: Decodable {
     struct Choice: Decodable {
         struct Delta: Decodable {
