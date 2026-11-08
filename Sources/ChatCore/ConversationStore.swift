@@ -1,8 +1,11 @@
 import Foundation
 
 public enum ConversationStore {
-    public static func load(from url: URL) throws -> [Conversation] {
+    /// `images` receives any photo an older chat file held inline.
+    public static func load(from url: URL, images: ImageStore? = nil) throws -> [Conversation] {
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        let decoder = decoder
+        decoder.userInfo[.imageStore] = images
         return try decoder.decode([Conversation].self, from: Data(contentsOf: url))
     }
 

@@ -1,12 +1,10 @@
 import SwiftUI
 
 public struct RootView: View {
-    @State private var store: ChatStore
+    let store: ChatStore
     @State private var showSettings = false
 
-    public init() { self.init(store: ChatStore()) }
-
-    init(store: ChatStore) { _store = State(initialValue: store) }
+    public init(store: ChatStore) { self.store = store }
 
     public var body: some View {
         NavigationSplitView {

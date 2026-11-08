@@ -18,8 +18,15 @@ public enum ImageAttachment {
     }
 
     public static func downsample(_ data: Data, maxPixels: Int) -> CGImage? {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
-        return CGImageSourceCreateThumbnailAtIndex(source, 0, [
+        CGImageSourceCreateWithData(data as CFData, nil).flatMap { thumbnail($0, maxPixels: maxPixels) }
+    }
+
+    public static func downsample(contentsOf url: URL, maxPixels: Int) -> CGImage? {
+        CGImageSourceCreateWithURL(url as CFURL, nil).flatMap { thumbnail($0, maxPixels: maxPixels) }
+    }
+
+    private static func thumbnail(_ source: CGImageSource, maxPixels: Int) -> CGImage? {
+        CGImageSourceCreateThumbnailAtIndex(source, 0, [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: maxPixels,

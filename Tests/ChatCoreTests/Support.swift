@@ -94,3 +94,11 @@ final class StubProtocol: URLProtocol {
         return data
     }
 }
+
+
+func makeImageStore() -> (store: ImageStore, cleanup: @Sendable () -> Void) {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    return (ImageStore(directory: dir), { try? FileManager.default.removeItem(at: dir) })
+}
+
+func fileSize(_ url: URL) -> Int { (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0 }

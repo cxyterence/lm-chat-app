@@ -75,18 +75,21 @@ func run(_ options: Options) async throws {
         return
     }
 
+    let store = ImageStore(directory: FileManager.default.temporaryDirectory.appendingPathComponent("chatcli-\(UUID())"))
+    defer { try? FileManager.default.removeItem(at: store.directory) }
     let images = try options.images.map { path in
         guard let jpeg = ImageAttachment.jpeg(from: try Data(contentsOf: URL(fileURLWithPath: path))) else {
             fail("\(path) is not an image")
         }
-        return jpeg
+        return try store.save(jpeg)
     }
 
     var wroteReasoning = false
     for try await event in client.stream(
         model: model,
         messages: [ChatMessage(role: .user, content: prompt, images: images)],
-        reasoningEffort: options.effort
+        reasoningEffort: options.effort,
+        images: store
     ) {
         switch event {
         case .reasoning(let text):

@@ -67,6 +67,7 @@ public final class ChatStore {
     @ObservationIgnored private let secrets: Secrets
     @ObservationIgnored private var effortCheck: Task<Void, Never>?
     @ObservationIgnored private let fileURL: URL
+    @ObservationIgnored let images: ImageStore
 
     public convenience init() {
         self.init(defaults: .standard, fileURL: ChatStore.defaultFileURL, secrets: .keychain)
@@ -76,12 +77,14 @@ public final class ChatStore {
         self.defaults = defaults
         self.fileURL = fileURL
         self.secrets = secrets
+        images = ImageStore(directory: fileURL.deletingLastPathComponent().appendingPathComponent("images"))
         preferredEffort = defaults.string(forKey: Keys.reasoningEffort).flatMap(ReasoningEffort.init(rawValue:))
         theme = defaults.string(forKey: Keys.theme).flatMap(Theme.init(rawValue:)) ?? .system
         loadConnections()
         do {
-            conversations = try ConversationStore.load(from: fileURL)
+            conversations = try ConversationStore.load(from: fileURL, images: images)
                 .sorted { $0.updatedAt > $1.updatedAt }
+            images.removeAll(except: Set(conversations.flatMap(\.messages).flatMap(\.images)))
         } catch {
             persistenceError = "Couldn't load saved chats: \(error.localizedDescription)"
         }
@@ -263,6 +266,7 @@ public final class ChatStore {
 
     func delete(ids: [UUID]) {
         for id in ids where isStreaming(id) { stop() }
+        images.remove(conversations.filter { ids.contains($0.id) }.flatMap(\.messages).flatMap(\.images))
         conversations.removeAll { ids.contains($0.id) }
         if let selection, !conversations.contains(where: { $0.id == selection }) {
             self.selection = conversations.first?.id
@@ -289,7 +293,7 @@ public final class ChatStore {
 
     var canSend: Bool { isConfigured && !model.isEmpty && !isBusy }
 
-    func send(_ text: String, images: [Data] = []) {
+    func send(_ text: String, images: [ImageID] = []) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || !images.isEmpty, canSend else { return }
 
@@ -347,7 +351,8 @@ public final class ChatStore {
         conversations[index].updatedAt = Date()
         liveReply = LiveReply(messageID: assistant.id)
 
-        let stream = ChatClient(config: config).stream(model: model, messages: wire, reasoningEffort: reasoningEffort)
+        let stream = ChatClient(config: config).stream(model: model, messages: wire, reasoningEffort: reasoningEffort,
+                                                       images: images)
         let task = Task { [weak self] in
             var failure: String?
             do {

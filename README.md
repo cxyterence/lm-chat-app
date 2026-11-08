@@ -31,7 +31,7 @@ Pick an iOS 17+ simulator or device and run the `LMChat` scheme. Add a connectio
 
 A bare host gets `http://` and `/v1` added. Anything with an explicit scheme or path is kept as typed (trailing slash trimmed).
 
-The photo button beside the message field attaches up to four photos. Each is downscaled to 1536 px on its long edge and sent as a JPEG `image_url` part, so the model has to accept images. A text-only model's refusal shows in the error banner.
+The photo button beside the message field attaches up to four photos. Each is downscaled to 1536 px on its long edge and sent as a JPEG `image_url` part, so the model has to accept images. A text-only model's refusal shows in the error banner. Photos are saved as files in `images/` beside `conversations.json`, which holds only their IDs, so saving a chat stays fast however many photos it has.
 
 ## chatcli
 

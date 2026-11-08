@@ -38,3 +38,5 @@ func imageInfo(_ data: Data) -> (type: String, width: Int, height: Int)? {
 }
 
 func garbage() -> Data { Data("not an image".utf8) }
+
+func bytes(_ text: String) -> Data { Data(text.utf8) }

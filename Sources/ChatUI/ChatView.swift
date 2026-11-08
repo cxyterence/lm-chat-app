@@ -6,7 +6,7 @@ struct ChatView: View {
     @Bindable var store: ChatStore
     let conversation: Conversation
     @State private var draft = ""
-    @State private var draftImages: [Data] = []
+    @State private var draftImages: [ImageID] = []
     @FocusState private var composerFocused: Bool
     @State private var atBottom = true
     @State private var following = true
@@ -21,7 +21,7 @@ struct ChatView: View {
             if let message = store.failureMessage(for: live.id) {
                 ErrorBanner(message: message, retry: store.retry, dismiss: store.dismissFailure)
             }
-            Composer(draft: $draft, images: $draftImages, focused: $composerFocused, streaming: streaming,
+            Composer(draft: $draft, images: $draftImages, store: store.images, focused: $composerFocused, streaming: streaming,
                      canSend: store.canSend, send: send, stop: store.stop)
         }
         .foregroundStyle(palette.text)
@@ -40,7 +40,7 @@ struct ChatView: View {
                 VStack(spacing: 12) {
                     ForEach(live.messages) { message in
                         let isLive = streaming && message.id == live.messages.last?.id
-                        MessageRow(message: message, isStreaming: isLive, reply: isLive ? store.liveReply : nil)
+                        MessageRow(message: message, images: store.images, isStreaming: isLive, reply: isLive ? store.liveReply : nil)
                             .transition(.opacity.combined(with: .offset(y: 12)))
                     }
                     Color.clear.frame(height: 1).id("bottom")
@@ -101,6 +101,7 @@ struct ChatView: View {
 
 private struct MessageRow: View {
     let message: ChatMessage
+    let images: ImageStore
     let isStreaming: Bool
     let reply: LiveReply?
     @Environment(\.palette) private var palette
@@ -111,7 +112,7 @@ private struct MessageRow: View {
             HStack {
                 Spacer(minLength: 48)
                 VStack(alignment: .trailing, spacing: 6) {
-                    if !message.images.isEmpty { SentImages(images: message.images) }
+                    if !message.images.isEmpty { SentImages(images: message.images.map(images.url)) }
                     if !message.content.isEmpty {
                         Text(message.content)
                             .textSelection(.enabled)
@@ -366,7 +367,8 @@ private struct ErrorBanner: View {
 
 private struct Composer: View {
     @Binding var draft: String
-    @Binding var images: [Data]
+    @Binding var images: [ImageID]
+    let store: ImageStore
     var focused: FocusState<Bool>.Binding
     let streaming: Bool
     let canSend: Bool
@@ -422,8 +424,8 @@ private struct Composer: View {
     private var attachments: some View {
         ScrollView(.horizontal) {
             HStack(spacing: 8) {
-                ForEach(Array(images.enumerated()), id: \.offset) { index, data in
-                    AttachmentImage(data: data, maxPixels: 240)
+                ForEach(Array(images.enumerated()), id: \.element) { index, id in
+                    AttachmentImage(url: store.url(for: id), maxPixels: 240)
                         .scaledToFill()
                         .frame(width: 64, height: 64)
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -456,9 +458,11 @@ private struct Composer: View {
         Task {
             for item in items {
                 let data = try? await item.loadTransferable(type: Data.self)
-                let jpeg = await Task.detached { data.flatMap { ImageAttachment.jpeg(from: $0) } }.value
+                let id = await Task.detached { [store] in
+                    data.flatMap { ImageAttachment.jpeg(from: $0) }.flatMap { try? store.save($0) }
+                }.value
                 loading -= 1
-                if let jpeg { images.append(jpeg) }
+                if let id { images.append(id) }
             }
         }
     }
@@ -466,19 +470,19 @@ private struct Composer: View {
 
 /// A sent message's photos, one fitted to the bubble width or a row of squares when there are several.
 private struct SentImages: View {
-    let images: [Data]
+    let images: [URL]
 
     var body: some View {
         if images.count == 1 {
-            AttachmentImage(data: images[0])
+            AttachmentImage(url: images[0])
                 .scaledToFit()
                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 .frame(maxWidth: 240, maxHeight: 320, alignment: .trailing)
                 .accessibilityLabel("Photo")
         } else {
             LazyVGrid(columns: [GridItem(.fixed(116)), GridItem(.fixed(116))], alignment: .trailing, spacing: 6) {
-                ForEach(Array(images.enumerated()), id: \.offset) { index, data in
-                    AttachmentImage(data: data, maxPixels: 360)
+                ForEach(Array(images.enumerated()), id: \.element) { index, url in
+                    AttachmentImage(url: url, maxPixels: 360)
                         .scaledToFill()
                         .frame(width: 116, height: 116)
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
