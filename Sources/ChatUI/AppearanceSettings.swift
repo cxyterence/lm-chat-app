@@ -3,16 +3,32 @@ import SwiftUI
 struct AppearanceSettings: View {
     let store: ChatStore
     @Environment(\.palette) private var palette
+    @State private var group: Theme.Group
+
+    init(store: ChatStore) {
+        self.store = store
+        _group = State(initialValue: store.theme.group)
+    }
+
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 10), count: 3)
 
     var body: some View {
         Form {
             Section("Theme") {
-                ForEach(Theme.allCases) { theme in
-                    Button { store.setTheme(theme) } label: {
-                        ThemeRow(theme: theme, selected: theme == store.theme)
-                    }
-                    .buttonStyle(.plain)
+                Picker("Theme group", selection: $group) {
+                    ForEach(Theme.Group.allCases) { Text($0.title).tag($0) }
                 }
+                .pickerStyle(.segmented)
+                LazyVGrid(columns: columns, spacing: 10) {
+                    ForEach(Theme.allCases.filter { $0.group == group }) { theme in
+                        Button { store.setTheme(theme) } label: {
+                            ThemeTile(theme: theme, selected: theme == store.theme)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.vertical, 4)
+                .animation(.snappy, value: group)
             }
             .listRowBackground(palette.surface)
 
@@ -43,48 +59,58 @@ struct AppearanceSettings: View {
     }
 }
 
-private struct ThemeRow: View {
+/// A tile painted in its own theme's colours, so the grid previews every theme at once.
+private struct ThemeTile: View {
     let theme: Theme
     let selected: Bool
-    @Environment(\.palette) private var palette
+    @Environment(\.palette) private var current
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        HStack(spacing: 12) {
-            // Native palettes are adaptive; resolve them in the theme's own scheme, not the current one.
-            ThemeSwatch(palette: theme.palette)
-                .environment(\.colorScheme, theme.colorScheme ?? colorScheme)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(theme.name).foregroundStyle(palette.text)
-                Text(theme.subtitle).font(.caption).foregroundStyle(palette.secondaryText)
+        // Native palettes are adaptive. Resolve them in the theme's own scheme, not the current one.
+        TileFace(name: theme.name, palette: theme.palette, selected: selected)
+            .environment(\.colorScheme, theme.colorScheme ?? colorScheme)
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(selected ? current.tint ?? current.accent : current.secondaryText.opacity(0.35),
+                                  lineWidth: selected ? 2.5 : 1)
             }
-            Spacer()
-            if selected {
-                Image(systemName: "checkmark").fontWeight(.semibold).foregroundStyle(palette.accent)
-            }
-        }
-        .contentShape(Rectangle())
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(selected ? .isSelected : [])
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(theme.name)
+            .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
     }
 }
 
-private struct ThemeSwatch: View {
+private struct TileFace: View {
+    let name: String
     let palette: Palette
+    let selected: Bool
 
     var body: some View {
-        RoundedRectangle(cornerRadius: 8, style: .continuous)
-            .fill(palette.background)
-            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(palette.secondaryText.opacity(0.5), lineWidth: 1))
-            .overlay(alignment: .topLeading) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Circle().fill(palette.accent).frame(width: 10, height: 10)
-                    Capsule().fill(palette.text).frame(width: 26, height: 3)
-                    Capsule().fill(palette.secondaryText).frame(width: 18, height: 3)
+        VStack(alignment: .leading, spacing: 8) {
+            Text(name)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(palette.text)
+                .lineLimit(2)
+                .minimumScaleFactor(0.85)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(spacing: 4) {
+                ForEach(Array([palette.accent, palette.secondaryText, palette.text].enumerated()), id: \.offset) {
+                    Circle().fill($0.element).frame(width: 8, height: 8)
                 }
-                .padding(7)
             }
-            .frame(width: 44, height: 36)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, minHeight: 68, alignment: .topLeading)
+        .overlay(alignment: .bottomTrailing) {
+            if selected {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.footnote)
+                    .foregroundStyle(palette.text)
+                    .padding(8)
+            }
+        }
+        .background(palette.background, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }
