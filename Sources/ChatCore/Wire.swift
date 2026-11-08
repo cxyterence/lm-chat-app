@@ -1,8 +1,35 @@
 import Foundation
 
-struct WireMessage: Codable, Equatable {
+/// `content` is a plain string, or a list of image and text parts when the message carries images.
+struct WireMessage: Encodable {
     let role: Role
     let content: String
+    var images: [Data] = []
+
+    private enum CodingKeys: String, CodingKey { case role, content }
+
+    private struct Part: Encodable {
+        struct ImageURL: Encodable { let url: String }
+        let type: String
+        var text: String?
+        var imageURL: ImageURL?
+
+        enum CodingKeys: String, CodingKey {
+            case type, text
+            case imageURL = "image_url"
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(role, forKey: .role)
+        guard !images.isEmpty else { return try container.encode(content, forKey: .content) }
+        var parts = images.map {
+            Part(type: "image_url", imageURL: .init(url: "data:image/jpeg;base64," + $0.base64EncodedString()))
+        }
+        if !content.isEmpty { parts.append(Part(type: "text", text: content)) }
+        try container.encode(parts, forKey: .content)
+    }
 }
 
 struct WireChatRequest: Encodable {

@@ -9,6 +9,8 @@ public struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
     public var role: Role
     public var content: String
     public var reasoning: String
+    /// JPEG bytes, sent to the model alongside `content`.
+    public var images: [Data]
     public var createdAt: Date
 
     public init(
@@ -16,13 +18,25 @@ public struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
         role: Role,
         content: String,
         reasoning: String = "",
+        images: [Data] = [],
         createdAt: Date = Date()
     ) {
         self.id = id
         self.role = role
         self.content = content
         self.reasoning = reasoning
+        self.images = images
         self.createdAt = createdAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        role = try c.decode(Role.self, forKey: .role)
+        content = try c.decode(String.self, forKey: .content)
+        reasoning = try c.decode(String.self, forKey: .reasoning)
+        images = try c.decodeIfPresent([Data].self, forKey: .images) ?? []
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
     }
 }
 

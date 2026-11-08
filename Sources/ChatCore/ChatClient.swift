@@ -96,7 +96,7 @@ public struct ChatClient: Sendable {
         request.httpBody = try JSONEncoder().encode(
             WireChatRequest(
                 model: model,
-                messages: messages.map { WireMessage(role: $0.role, content: $0.content) },
+                messages: messages.map { WireMessage(role: $0.role, content: $0.content, images: $0.images) },
                 stream: true,
                 reasoningEffort: reasoningEffort
             )

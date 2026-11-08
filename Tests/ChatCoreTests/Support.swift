@@ -14,6 +14,13 @@ func makeTempFileURL(_ name: String) -> (url: URL, cleanup: @Sendable () -> Void
 
 func date(_ seconds: TimeInterval) -> Date { Date(timeIntervalSince1970: seconds) }
 
+func bytes(_ text: String) -> Data { Data(text.utf8) }
+
+func write(_ text: String, to url: URL) throws {
+    try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data(text.utf8).write(to: url)
+}
+
 /// A fake OpenAI-compatible server reached through URLProtocol. Each instance owns a unique host,
 /// so tests using different servers can run in parallel.
 final class StubServer: @unchecked Sendable {
