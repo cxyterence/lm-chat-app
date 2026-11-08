@@ -182,31 +182,33 @@ extension Palette {
 
     static let native: Palette = {
         #if os(iOS)
-        let text = Color(uiColor: .label), secondaryText = Color(uiColor: .secondaryLabel)
+        // A fixed blue, not .accentColor: that resolves to the active tint, which is another theme's accent
+        // when these colours are drawn on a preset's Appearance page.
+        let text = Color(uiColor: .label), secondaryText = Color(uiColor: .secondaryLabel), accent = Color(uiColor: .systemBlue)
         return Palette(background: Color(uiColor: .systemBackground),
                        groupedBackground: Color(uiColor: .systemGroupedBackground),
                        surface: Color(uiColor: .secondarySystemGroupedBackground),
                        fill: Color(uiColor: .secondarySystemBackground),
                        text: text, secondaryText: secondaryText,
-                       accent: .accentColor, onAccent: .white, success: .green, danger: .red,
-                       markup: .plain(text: text, secondaryText: secondaryText))
+                       accent: accent, onAccent: .white, success: .green, danger: .red,
+                       markup: .plain(text: text, secondaryText: secondaryText, link: accent))
         #else
-        let text = Color(nsColor: .labelColor), secondaryText = Color(nsColor: .secondaryLabelColor)
+        let text = Color(nsColor: .labelColor), secondaryText = Color(nsColor: .secondaryLabelColor), accent = Color(nsColor: .systemBlue)
         return Palette(background: Color(nsColor: .windowBackgroundColor),
                        groupedBackground: Color(nsColor: .underPageBackgroundColor),
                        surface: Color(nsColor: .controlBackgroundColor),
                        fill: Color(nsColor: .quaternaryLabelColor),
                        text: text, secondaryText: secondaryText,
-                       accent: .accentColor, onAccent: .white, success: .green, danger: .red,
-                       markup: .plain(text: text, secondaryText: secondaryText))
+                       accent: accent, onAccent: .white, success: .green, danger: .red,
+                       markup: .plain(text: text, secondaryText: secondaryText, link: accent))
         #endif
     }()
 }
 
 extension Markup {
-    static func plain(text: Color, secondaryText: Color) -> Markup {
+    static func plain(text: Color, secondaryText: Color, link: Color) -> Markup {
         Markup(heading: text, strong: text, emphasis: text, code: text,
-               link: .accentColor, quote: secondaryText, marker: secondaryText)
+               link: link, quote: secondaryText, marker: secondaryText)
     }
 }
 

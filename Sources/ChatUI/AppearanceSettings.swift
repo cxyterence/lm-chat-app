@@ -28,7 +28,6 @@ struct AppearanceSettings: View {
                     }
                 }
                 .padding(.vertical, 4)
-                .animation(.snappy, value: group)
             }
             .listRowBackground(palette.surface)
 
@@ -64,12 +63,21 @@ private struct ThemeTile: View {
     let theme: Theme
     let selected: Bool
     @Environment(\.palette) private var current
-    @Environment(\.colorScheme) private var colorScheme
+
+    /// Native palettes are adaptive, so each is resolved in its own scheme rather than the current one.
+    /// System follows the device, so its tile shows both: light, with dark across the lower-right half.
+    @ViewBuilder private var face: some View {
+        let tile = TileFace(name: theme.name, palette: theme.palette, selected: selected)
+        if let scheme = theme.colorScheme {
+            tile.environment(\.colorScheme, scheme)
+        } else {
+            tile.environment(\.colorScheme, .light)
+                .overlay { tile.environment(\.colorScheme, .dark).mask(LowerRightHalf()) }
+        }
+    }
 
     var body: some View {
-        // Native palettes are adaptive. Resolve them in the theme's own scheme, not the current one.
-        TileFace(name: theme.name, palette: theme.palette, selected: selected)
-            .environment(\.colorScheme, theme.colorScheme ?? colorScheme)
+        face
             .overlay {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .strokeBorder(selected ? current.tint ?? current.accent : current.secondaryText.opacity(0.35),
@@ -112,5 +120,16 @@ private struct TileFace: View {
             }
         }
         .background(palette.background, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+private struct LowerRightHalf: Shape {
+    func path(in rect: CGRect) -> Path {
+        Path { path in
+            path.move(to: CGPoint(x: rect.maxX, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+            path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+            path.closeSubpath()
+        }
     }
 }
