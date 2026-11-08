@@ -505,11 +505,13 @@ private struct ModelPanel: View {
 private struct EffortSlider: View {
     static let trackHeight: CGFloat = 34
     private static let inset: CGFloat = 3
+    private static let glide = Animation.snappy(duration: 0.2)
 
     let levels: [ReasoningEffort]
     let selection: ReasoningEffort
     let select: (ReasoningEffort) -> Void
     @Environment(\.palette) private var palette
+    /// Where the finger holds the knob. nil when the knob rests on the selected level.
     @State private var dragX: CGFloat?
 
     private var selectedIndex: Int { levels.firstIndex(of: selection) ?? 0 }
@@ -517,13 +519,17 @@ private struct EffortSlider: View {
     var body: some View {
         GeometryReader { geometry in
             let width = geometry.size.width
+            let knobX = dragX ?? x(selectedIndex, width)
             ZStack(alignment: .topLeading) {
                 Capsule()
                     .fill(palette.secondaryText.opacity(0.15))
                     .frame(height: Self.trackHeight)
+                Capsule()
+                    .fill(palette.accent)
+                    .frame(width: knobX + Self.trackHeight / 2, height: Self.trackHeight)
                 ForEach(levels.indices, id: \.self) { index in
                     Circle()
-                        .fill(palette.secondaryText.opacity(0.5))
+                        .fill(x(index, width) < knobX ? palette.onAccent.opacity(0.5) : palette.secondaryText.opacity(0.5))
                         .frame(width: 5, height: 5)
                         .position(x: x(index, width), y: Self.trackHeight / 2)
                     Text(levels[index].label)
@@ -533,25 +539,32 @@ private struct EffortSlider: View {
                         .position(x: x(index, width), y: Self.trackHeight + 14)
                 }
                 Circle()
-                    .fill(palette.accent)
-                    .shadow(color: .black.opacity(0.2), radius: 3, y: 1)
+                    .fill(.white)
+                    .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
                     .frame(width: Self.trackHeight - 2 * Self.inset, height: Self.trackHeight - 2 * Self.inset)
-                    .position(x: dragX ?? x(selectedIndex, width), y: Self.trackHeight / 2)
+                    .position(x: knobX, y: Self.trackHeight / 2)
             }
+            // Glide when the level changes without a finger on the knob (VoiceOver). While dragging the knob
+            // tracks the finger exactly, since an animation there makes it trail behind.
+            .animation(dragX == nil ? Self.glide : nil, value: selection)
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { drag in
                         let lo = x(0, width), hi = x(levels.count - 1, width)
-                        dragX = min(max(drag.location.x, lo), hi)
-                        let nearest = Int(((dragX! - lo) / step(width)).rounded())
+                        let clamped = min(max(drag.location.x, lo), hi)
+                        if dragX == nil {
+                            withAnimation(Self.glide) { dragX = clamped }
+                        } else {
+                            dragX = clamped
+                        }
+                        let nearest = Int(((clamped - lo) / step(width)).rounded())
                         if levels[nearest] != selection { select(levels[nearest]) }
                     }
-                    .onEnded { _ in withAnimation(.snappy) { dragX = nil } }
+                    .onEnded { _ in withAnimation(Self.glide) { dragX = nil } }
             )
         }
         .frame(height: Self.trackHeight + 24)
-        .animation(.snappy, value: selection)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Reasoning effort")
         .accessibilityValue(selection.label)
