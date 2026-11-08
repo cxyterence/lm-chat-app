@@ -2,7 +2,7 @@
 
 An iOS chat client for locally hosted LLMs. Point it at any OpenAI-compatible endpoint (LM Studio, Ollama `/v1`, `llama-server`, vLLM, or a remote HTTPS host), pick a model from `/v1/models`, and chat with streamed replies. Conversations are stored on device.
 
-A connection is a URL and an optional API key, plus the model and system prompt last used with it. Save as many as you like under Settings > Connections and tap one to switch, for example between a home server and a hosted API. Keys are kept in the Keychain.
+A connection is a URL and an optional API key, plus the model and system prompt last used with it. Save as many as you like under Settings > Connections and tap one to switch, for example between a home server and a hosted API. Keys are kept in the Keychain. On an `api.openai.com` connection the model list shows only text models from gpt-6 on, plus gpt-4o-mini.
 
 ## Layout
 

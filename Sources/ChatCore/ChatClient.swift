@@ -22,7 +22,8 @@ public struct ChatClient: Sendable {
         guard let list = try? JSONDecoder().decode(WireModelList.self, from: data) else {
             throw ChatClientError.invalidResponse
         }
-        return list.data.map(\.id).sorted()
+        let ids = list.data.map(\.id)
+        return (config.baseURL.host() == OpenAIModels.host ? ids.filter(OpenAIModels.isOffered) : ids).sorted()
     }
 
     public func stream(
