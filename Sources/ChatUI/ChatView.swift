@@ -376,6 +376,8 @@ private struct Composer: View {
     let stop: () -> Void
     @State private var picks: [PhotosPickerItem] = []
     @State private var loading = 0
+    /// One line of body text plus the field's vertical padding, so both buttons are exactly as tall as the empty field.
+    @ScaledMetric(relativeTo: .body) private var height: CGFloat = 38
     @Environment(\.palette) private var palette
 
     private var isEmpty: Bool { draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && images.isEmpty }
@@ -385,30 +387,38 @@ private struct Composer: View {
         VStack(alignment: .leading, spacing: 8) {
             if !images.isEmpty || loading > 0 { attachments }
             HStack(alignment: .bottom, spacing: 8) {
+                let plus = CircleIcon(systemImage: "plus", size: height,
+                                      foreground: room > 0 ? palette.text : palette.secondaryText, background: palette.fill)
                 PhotosPicker(selection: $picks, maxSelectionCount: max(room, 1), selectionBehavior: .ordered,
                              matching: .images) {
-                    Label("Add Photos", systemImage: "photo.badge.plus")
-                        .labelStyle(.iconOnly).font(.title2)
-                        .frame(width: 36, height: 36)
+                    Label { Text("Add Photos") } icon: { plus }.labelStyle(.iconOnly)
                 }
-                .foregroundStyle(room > 0 ? palette.accent : palette.secondaryText)
                 .disabled(room <= 0)
                 TextField("Message", text: $draft, axis: .vertical)
                     .lineLimit(1...6)
                     .focused(focused)
                     .textFieldStyle(.plain)
                     .padding(.horizontal, 12).padding(.vertical, 8)
+                    .frame(minHeight: height)
                     .foregroundStyle(palette.text)
-                    .background(palette.fill, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .background(palette.fill, in: RoundedRectangle(cornerRadius: height / 2, style: .continuous))
                 if streaming {
-                    Button("Stop", systemImage: "stop.circle.fill", action: stop)
-                        .labelStyle(.iconOnly).font(.title)
-                        .foregroundStyle(palette.danger)
+                    Button(action: stop) {
+                        Label { Text("Stop") } icon: {
+                            CircleIcon(systemImage: "stop.fill", size: height, foreground: .white, background: palette.danger)
+                        }
+                        .labelStyle(.iconOnly)
+                    }
                 } else {
-                    Button("Send", systemImage: "arrow.up.circle.fill", action: send)
-                        .labelStyle(.iconOnly).font(.title)
-                        .foregroundStyle(palette.accent)
-                        .disabled(!canSend || isEmpty || loading > 0)
+                    let ready = canSend && !isEmpty && loading == 0
+                    Button(action: send) {
+                        Label { Text("Send") } icon: {
+                            CircleIcon(systemImage: "arrow.up", size: height, foreground: palette.onAccent,
+                                       background: palette.accent.opacity(ready ? 1 : 0.4))
+                        }
+                        .labelStyle(.iconOnly)
+                    }
+                    .disabled(!ready)
                 }
             }
         }
@@ -465,6 +475,21 @@ private struct Composer: View {
                 if let id { images.append(id) }
             }
         }
+    }
+}
+
+private struct CircleIcon: View {
+    let systemImage: String
+    let size: CGFloat
+    let foreground: Color
+    let background: Color
+
+    var body: some View {
+        Image(systemName: systemImage)
+            .font(.system(size: size * 0.45, weight: .semibold))
+            .foregroundStyle(foreground)
+            .frame(width: size, height: size)
+            .background(background, in: Circle())
     }
 }
 
