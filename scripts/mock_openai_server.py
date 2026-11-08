@@ -10,7 +10,7 @@ A prompt starting with "/long" streams a long Markdown reply in irregular bursts
 On mock-reasoning, "/long" streams a long bursty reasoning section first.
 On mock-reasoning, "/huge" streams ~20k characters of reasoning then ~6k of Markdown, fast, as a load test.
 "/spans" streams inline formatting slowly, three characters at a time, to show half-finished spans.
-Set MOCK_API_KEY to require `Authorization: Bearer <key>`.
+Set MOCK_API_KEY to require `Authorization: Bearer <key>`. Set MOCK_EXTRA_MODELS=96 to list a long model list like OpenAI's.
 """
 import argparse
 import json
@@ -20,6 +20,8 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MODELS = ["mock-chat", "mock-reasoning", "mock-ollama", "mock-think"]
+# A long list like OpenAI's (~100 ids), to exercise the model picker.
+MODELS += [f"mock-extra-{i:03}" for i in range(int(os.environ.get("MOCK_EXTRA_MODELS", "0")))]
 # Like vLLM with the user's template. Other models ignore reasoning_effort, as llama.cpp does.
 EFFORTS = {"mock-reasoning": {"none", "low", "medium", "xhigh"}}
 

@@ -26,7 +26,8 @@ struct WireProbeRequest: Encodable {
 
     enum CodingKeys: String, CodingKey {
         case model, messages, stream
-        case maxTokens = "max_tokens"
+        // OpenAI's reasoning models reject max_tokens. vLLM accepts either.
+        case maxTokens = "max_completion_tokens"
         case reasoningEffort = "reasoning_effort"
     }
 }

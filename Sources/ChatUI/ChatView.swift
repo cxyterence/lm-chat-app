@@ -412,6 +412,7 @@ private struct ModelButton: View {
 private struct ModelPanel: View {
     let store: ChatStore
     @Environment(\.palette) private var palette
+    @State private var listHeight: CGFloat = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -421,9 +422,15 @@ private struct ModelPanel: View {
                 Button("Refresh Models", systemImage: "arrow.clockwise") { Task { await store.refreshModels() } }
                     .labelStyle(.iconOnly)
             }
-            ViewThatFits(in: .vertical) {
-                modelList
-                ScrollView { modelList }.frame(maxHeight: 240)
+            // A popover sizes to its content's ideal height, so a long list (OpenAI lists ~100) must be
+            // capped explicitly or the popover grows to the full screen.
+            ScrollViewReader { proxy in
+                ScrollView {
+                    modelList.onGeometryChange(for: CGFloat.self, of: \.size.height) { listHeight = $0 }
+                }
+                .frame(height: min(max(listHeight, 1), 280))
+                .scrollBounceBehavior(.basedOnSize)
+                .onAppear { proxy.scrollTo(store.model, anchor: .center) }
             }
             Divider().overlay(palette.secondaryText.opacity(0.3))
             effortSection
@@ -488,6 +495,7 @@ private struct ModelPanel: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .id(id)
             }
         }
     }

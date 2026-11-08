@@ -3,6 +3,8 @@ import Foundation
 extension ChatClient {
     /// The levels the server accepts for `model`, least thinking first, found by sending a one-token request
     /// per level. Empty when the server also accepts a made-up level, since it then isn't reading the field.
+    /// Only an error about the effort field rejects a level. OpenAI answers a supported level with a 400 too,
+    /// because one token is too few for a reasoning model to finish.
     public func reasoningEfforts(model: String) async throws -> [ReasoningEffort] {
         let decoy = "lmchat-probe"
         let accepted = try await withThrowingTaskGroup(of: (String, Bool).self) { group in
@@ -27,7 +29,9 @@ extension ChatClient {
         guard let http = response as? HTTPURLResponse else { throw ChatClientError.invalidResponse }
         switch http.statusCode {
         case 200..<300: return true
-        case 400, 422: return false
+        case 400, 422:
+            let body = String(decoding: data, as: UTF8.self).lowercased()
+            return !(body.contains("reasoning_effort") || body.contains("reasoning effort"))
         default: throw Self.httpError(status: http.statusCode, body: data)
         }
     }
