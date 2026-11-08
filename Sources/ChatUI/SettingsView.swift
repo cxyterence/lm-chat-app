@@ -14,24 +14,21 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     }
 }
 
-struct ConnectionDraft {
-    var baseURL = ""
-    var apiKey = ""
-    var systemPrompt = ""
-    var model = ""
-    var parseError: String?
+/// Which connection the editor opens: a blank one, or a saved one by ID.
+enum ConnectionRoute: Hashable {
+    case new
+    case edit(UUID)
 }
 
 struct SettingsView: View {
     let store: ChatStore
-    @State private var path: [SettingsPage]
-    @State private var draft = ConnectionDraft()
+    @State private var path: NavigationPath
     @Environment(\.dismiss) private var dismiss
     @Environment(\.palette) private var palette
 
     init(store: ChatStore, page: SettingsPage? = nil) {
         self.store = store
-        _path = State(initialValue: page.map { [$0] } ?? [])
+        _path = State(initialValue: NavigationPath(page.map { [$0] } ?? []))
     }
 
     var body: some View {
@@ -52,49 +49,32 @@ struct SettingsView: View {
             }
             .scrollContentBackground(.hidden)
             .background(palette.groupedBackground)
-            .modifier(SettingsChrome(title: "Settings", done: done))
+            .modifier(SettingsChrome(title: "Settings", done: { dismiss() }))
             .navigationDestination(for: SettingsPage.self) { page in
                 Group {
                     switch page {
-                    case .connections: ConnectionsSettings(store: store, draft: $draft)
+                    case .connections: ConnectionsSettings(store: store) { path.append($0) }
                     case .appearance: AppearanceSettings(store: store)
                     }
                 }
                 .background(palette.groupedBackground)
-                .modifier(SettingsChrome(title: page.title, done: done))
+                .modifier(SettingsChrome(title: page.title, done: { dismiss() }))
+            }
+            .navigationDestination(for: ConnectionRoute.self) { route in
+                ConnectionEditor(store: store, route: route)
+                    .background(palette.groupedBackground)
             }
         }
         #if os(macOS)
         .frame(minWidth: 420, minHeight: 520)
         #endif
-        .onAppear {
-            draft.baseURL = store.baseURLText
-            draft.apiKey = store.apiKey
-            draft.systemPrompt = store.systemPrompt
-            draft.model = store.model
-        }
     }
 
     private func summary(_ page: SettingsPage) -> String {
         switch page {
-        case .connections: store.config?.baseURL.host() ?? "Not set"
+        case .connections: store.activeConnection?.name ?? "Not set"
         case .appearance: store.theme.name
         }
-    }
-
-    private func done() {
-        do {
-            if draft.baseURL != store.baseURLText || draft.apiKey != store.apiKey {
-                try store.applyServer(baseURL: draft.baseURL, apiKey: draft.apiKey)
-                Task { await store.refreshModels() }
-            }
-        } catch {
-            draft.parseError = error.localizedDescription
-            path = [.connections]
-            return
-        }
-        store.updatePreferences(model: draft.model.isEmpty ? nil : draft.model, systemPrompt: draft.systemPrompt)
-        dismiss()
     }
 }
 
@@ -116,80 +96,185 @@ private struct SettingsChrome: ViewModifier {
 
 struct ConnectionsSettings: View {
     let store: ChatStore
-    @Binding var draft: ConnectionDraft
+    let open: (ConnectionRoute) -> Void
     @Environment(\.palette) private var palette
 
     var body: some View {
-        Form {
+        List {
             Section {
-                TextField("Server URL", text: $draft.baseURL)
+                ForEach(store.connections) { connection in
+                    row(connection)
+                        .swipeActions {
+                            Button("Delete", role: .destructive) { store.deleteConnection(connection.id) }
+                        }
+                }
+                Button { open(.new) } label: {
+                    Label("Add Connection", systemImage: "plus").foregroundStyle(palette.accent)
+                }
+            } footer: {
+                Text("Tap a connection to use it. Each one keeps its own server, key, model and system prompt.")
+            }
+            .listRowBackground(palette.surface)
+        }
+        .foregroundStyle(palette.text)
+        .scrollContentBackground(.hidden)
+    }
+
+    private func row(_ connection: Connection) -> some View {
+        let active = connection.id == store.activeConnectionID
+        return HStack(spacing: 12) {
+            Button { if !active { store.activate(connection.id) } } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "checkmark")
+                        .fontWeight(.semibold)
+                        .foregroundStyle(palette.accent)
+                        .opacity(active ? 1 : 0)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(connection.name).foregroundStyle(palette.text)
+                        if active {
+                            status
+                        } else {
+                            Text(Connection.address(of: connection.baseURL))
+                                .foregroundStyle(palette.secondaryText)
+                        }
+                    }
+                    .font(.body)
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .accessibilityLabel(connection.name)
+            .accessibilityAddTraits(active ? .isSelected : [])
+            Button("Edit \(connection.name)", systemImage: "info.circle") { open(.edit(connection.id)) }
+                .labelStyle(.iconOnly)
+                .font(.title3)
+                .foregroundStyle(palette.accent)
+        }
+        .buttonStyle(.borderless)
+    }
+
+    @ViewBuilder private var status: some View {
+        Group {
+            switch store.models {
+            case .idle:
+                Text("Not connected").foregroundStyle(palette.secondaryText)
+            case .loading:
+                Text("Connecting…").foregroundStyle(palette.secondaryText)
+            case .loaded(let ids):
+                Text("Connected · \(ids.count) model\(ids.count == 1 ? "" : "s")").foregroundStyle(palette.success)
+            case .failed(let message):
+                Text(message).foregroundStyle(palette.danger).lineLimit(2)
+            }
+        }
+        .font(.caption)
+    }
+}
+
+struct ConnectionEditor: View {
+    let store: ChatStore
+    let route: ConnectionRoute
+    @State private var name = ""
+    @State private var baseURL = ""
+    @State private var apiKey = ""
+    @State private var systemPrompt = ""
+    @State private var error: String?
+    @State private var confirmingDelete = false
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.palette) private var palette
+
+    private var existing: Connection? {
+        guard case .edit(let id) = route else { return nil }
+        return store.connections.first { $0.id == id }
+    }
+
+    var body: some View {
+        Form {
+            Section("Name") {
+                TextField("Name", text: $name, prompt: Text(hostHint ?? "My server"))
+            }
+            .listRowBackground(palette.surface)
+
+            Section {
+                TextField("Server URL", text: $baseURL)
                     .autocorrectionDisabled()
                     #if os(iOS)
                     .textInputAutocapitalization(.never)
                     .keyboardType(.URL)
                     #endif
-                SecureField("API key (optional)", text: $draft.apiKey)
-                Button("Connect") { Task { await connect() } }
-                if let parseError = draft.parseError {
-                    Text(parseError).foregroundStyle(palette.danger).font(.callout)
+                SecureField("API key (optional)", text: $apiKey)
+                if let error {
+                    Text(error).foregroundStyle(palette.danger).font(.callout)
                 }
-                statusRow
             } header: {
                 Text("Server")
             } footer: {
-                Text("Examples: 192.168.1.5:1234 (LM Studio), 192.168.1.5:11434 (Ollama), 192.168.1.5:8080 (llama.cpp). \"/v1\" is added when the address has no path.")
+                Text(verbatim: "Examples: 192.168.1.5:1234 (LM Studio), 192.168.1.5:11434 (Ollama), https://api.openai.com/v1. \"/v1\" is added when the address has no path.")
             }
             .listRowBackground(palette.surface)
 
-            if !store.availableModels.isEmpty {
-                Section("Model") {
-                    Picker("Model", selection: $draft.model) {
-                        ForEach(store.availableModels, id: \.self) { Text($0).tag($0) }
-                    }
-                }
-                .listRowBackground(palette.surface)
-            }
-
             Section {
-                TextEditor(text: $draft.systemPrompt)
+                TextEditor(text: $systemPrompt)
                     .scrollContentBackground(.hidden)
                     .frame(minHeight: 100)
             } header: {
                 Text("System Prompt")
             } footer: {
-                Text("Sent before every conversation. Leave empty for none.")
+                Text("Sent before every conversation on this connection. Leave empty for none.")
             }
             .listRowBackground(palette.surface)
+
+            if existing != nil {
+                Section {
+                    Button("Delete Connection", role: .destructive) { confirmingDelete = true }
+                }
+                .listRowBackground(palette.surface)
+            }
         }
         .formStyle(.grouped)
         .foregroundStyle(palette.text)
         .scrollContentBackground(.hidden)
-    }
-
-    @ViewBuilder private var statusRow: some View {
-        switch store.models {
-        case .idle:
-            Label("Not connected", systemImage: "circle.dashed").foregroundStyle(palette.secondaryText)
-        case .loading:
-            HStack { ProgressView(); Text("Connecting…").foregroundStyle(palette.secondaryText) }
-        case .loaded(let ids):
-            Label("\(ids.count) model\(ids.count == 1 ? "" : "s")", systemImage: "checkmark.circle.fill")
-                .foregroundStyle(palette.success)
-        case .failed(let message):
-            Label(message, systemImage: "exclamationmark.triangle.fill").foregroundStyle(palette.danger)
+        .navigationTitle(existing == nil ? "New Connection" : "Edit Connection")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Save", action: save).disabled(baseURL.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .confirmationDialog("Delete this connection?", isPresented: $confirmingDelete, titleVisibility: .visible) {
+            Button("Delete Connection", role: .destructive) {
+                if let existing { store.deleteConnection(existing.id) }
+                dismiss()
+            }
+        }
+        .onAppear {
+            guard let existing else { return }
+            name = existing.name
+            baseURL = existing.baseURL.absoluteString
+            apiKey = store.apiKey(for: existing.id)
+            systemPrompt = existing.systemPrompt
         }
     }
 
-    private func connect() async {
+    private var hostHint: String? {
+        (try? ServerConfig.parse(baseURL: baseURL, apiKey: "")).map { Connection.address(of: $0.baseURL) }
+    }
+
+    private func save() {
+        let parsed: ServerConfig
         do {
-            try store.applyServer(baseURL: draft.baseURL, apiKey: draft.apiKey)
-            draft.parseError = nil
-            draft.baseURL = store.baseURLText
+            parsed = try ServerConfig.parse(baseURL: baseURL, apiKey: apiKey)
         } catch {
-            draft.parseError = error.localizedDescription
+            self.error = error.localizedDescription
             return
         }
-        await store.refreshModels()
-        if store.availableModels.contains(draft.model) == false { draft.model = store.model }
+        let trimmedName = name.trimmingCharacters(in: .whitespaces)
+        var connection = existing ?? Connection(name: "", baseURL: parsed.baseURL)
+        connection.name = trimmedName.isEmpty ? Connection.address(of: parsed.baseURL) : trimmedName
+        connection.baseURL = parsed.baseURL
+        connection.systemPrompt = systemPrompt
+        store.saveConnection(connection, apiKey: parsed.apiKey ?? "")
+        dismiss()
     }
 }

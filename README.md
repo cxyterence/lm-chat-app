@@ -2,7 +2,7 @@
 
 An iOS chat client for locally hosted LLMs. Point it at any OpenAI-compatible endpoint (LM Studio, Ollama `/v1`, `llama-server`, vLLM, or a remote HTTPS host), pick a model from `/v1/models`, and chat with streamed replies. Conversations are stored on device.
 
-Connection is two inputs: a URL and an optional API key.
+A connection is a URL and an optional API key, plus the model and system prompt last used with it. Save as many as you like under Settings > Connections and tap one to switch, for example between a home server and a hosted API. Keys are kept in the Keychain.
 
 ## Layout
 
@@ -20,7 +20,7 @@ xcodegen generate   # only needed after editing project.yml
 open LMChat.xcodeproj
 ```
 
-Pick an iOS 17+ simulator or device and run the `LMChat` scheme. Enter a server address in Settings:
+Pick an iOS 17+ simulator or device and run the `LMChat` scheme. Add a connection in Settings > Connections:
 
 | Server | Address |
 | --- | --- |

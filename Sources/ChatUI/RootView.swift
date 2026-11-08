@@ -21,7 +21,7 @@ public struct RootView: View {
         }
         .theme(store.theme)
         .sheet(isPresented: $showSettings) {
-            SettingsView(store: store).theme(store.theme)
+            SettingsView(store: store, page: store.isConfigured ? nil : .connections).theme(store.theme)
         }
         .task {
             if store.isConfigured {

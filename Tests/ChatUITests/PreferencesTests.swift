@@ -9,11 +9,11 @@ struct PreferencesTests {
         let (file, cleanFile) = makeTempFileURL("conversations.json")
         defer { cleanDefaults(); cleanFile() }
 
-        let first = ChatStore(defaults: defaults, fileURL: file, apiKey: "")
+        let first = ChatStore(defaults: defaults, fileURL: file, secrets: .memory())
         first.setTheme(.dracula)
         first.setReasoningEffort(.low)
 
-        let second = ChatStore(defaults: defaults, fileURL: file, apiKey: "")
+        let second = ChatStore(defaults: defaults, fileURL: file, secrets: .memory())
         #expect(second.theme == .dracula)
         #expect(second.reasoningEffort == .low)
     }
@@ -23,8 +23,8 @@ struct PreferencesTests {
         let (file, cleanFile) = makeTempFileURL("conversations.json")
         defer { cleanDefaults(); cleanFile() }
 
-        #expect(ChatStore(defaults: defaults, fileURL: file, apiKey: "").theme == .system)
+        #expect(ChatStore(defaults: defaults, fileURL: file, secrets: .memory()).theme == .system)
         defaults.set("solarized", forKey: "theme")
-        #expect(ChatStore(defaults: defaults, fileURL: file, apiKey: "").theme == .system)
+        #expect(ChatStore(defaults: defaults, fileURL: file, secrets: .memory()).theme == .system)
     }
 }

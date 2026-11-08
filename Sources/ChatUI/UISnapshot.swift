@@ -24,7 +24,7 @@ public enum UISnapshot {
 
             let store = ChatStore(defaults: defaults,
                                   fileURL: scratch.appendingPathComponent("conversations.json"),
-                                  apiKey: "")
+                                  secrets: .memory())
             store.setTheme(theme)
             let appearance = NSAppearance(named: theme.colorScheme == .dark ? .darkAqua : .aqua)
 

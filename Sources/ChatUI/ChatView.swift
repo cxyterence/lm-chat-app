@@ -478,7 +478,7 @@ private struct ModelPanel: View {
                     .foregroundStyle(palette.secondaryText)
             }
             ForEach(store.availableModels, id: \.self) { id in
-                Button { store.updatePreferences(model: id) } label: {
+                Button { store.selectModel(id) } label: {
                     HStack {
                         Text(id).lineLimit(1).truncationMode(.middle)
                         Spacer()

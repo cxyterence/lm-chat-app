@@ -36,20 +36,25 @@ public final class ChatStore {
     }
 
     private enum Keys {
+        static let connections = "connections"
+        static let activeConnection = "activeConnection"
+        static let reasoningEffort = "reasoningEffort"
+        static let theme = "theme"
+    }
+
+    /// Settings from before connections existed, read once to build the first connection.
+    private enum LegacyKeys {
         static let baseURL = "baseURL"
         static let model = "model"
         static let systemPrompt = "systemPrompt"
-        static let reasoningEffort = "reasoningEffort"
-        static let theme = "theme"
         static let apiKey = "apiKey"
     }
 
     var conversations: [Conversation] = []
     var selection: UUID?
-    private(set) var baseURLText: String
-    private(set) var apiKey: String
-    private(set) var model: String
-    private(set) var systemPrompt: String
+    private(set) var connections: [Connection] = []
+    private(set) var activeConnectionID: UUID?
+    private var apiKeys: [UUID: String] = [:]
     private var preferredEffort: ReasoningEffort?
     private(set) var effortLevels: EffortLevels = .checking
     private(set) var theme: Theme
@@ -59,22 +64,21 @@ public final class ChatStore {
     private(set) var persistenceError: String?
 
     @ObservationIgnored let defaults: UserDefaults
+    @ObservationIgnored private let secrets: Secrets
     @ObservationIgnored private var effortCheck: Task<Void, Never>?
     @ObservationIgnored private let fileURL: URL
 
     public convenience init() {
-        self.init(defaults: .standard, fileURL: ChatStore.defaultFileURL)
+        self.init(defaults: .standard, fileURL: ChatStore.defaultFileURL, secrets: .keychain)
     }
 
-    init(defaults: UserDefaults, fileURL: URL, apiKey: String? = nil) {
+    init(defaults: UserDefaults, fileURL: URL, secrets: Secrets) {
         self.defaults = defaults
         self.fileURL = fileURL
-        baseURLText = defaults.string(forKey: Keys.baseURL) ?? ""
-        model = defaults.string(forKey: Keys.model) ?? ""
-        systemPrompt = defaults.string(forKey: Keys.systemPrompt) ?? ""
+        self.secrets = secrets
         preferredEffort = defaults.string(forKey: Keys.reasoningEffort).flatMap(ReasoningEffort.init(rawValue:))
         theme = defaults.string(forKey: Keys.theme).flatMap(Theme.init(rawValue:)) ?? .system
-        self.apiKey = apiKey ?? Keychain.get(Keys.apiKey) ?? ""
+        loadConnections()
         do {
             conversations = try ConversationStore.load(from: fileURL)
                 .sorted { $0.updatedAt > $1.updatedAt }
@@ -93,9 +97,18 @@ public final class ChatStore {
 
     // MARK: Server and settings
 
-    var config: ServerConfig? {
-        try? ServerConfig.parse(baseURL: baseURLText, apiKey: apiKey)
+    var activeConnection: Connection? {
+        connections.first { $0.id == activeConnectionID }
     }
+
+    var config: ServerConfig? {
+        activeConnection.map { ServerConfig(baseURL: $0.baseURL, apiKey: apiKeys[$0.id]) }
+    }
+
+    var model: String { activeConnection?.model ?? "" }
+    var systemPrompt: String { activeConnection?.systemPrompt ?? "" }
+
+    func apiKey(for id: UUID) -> String { apiKeys[id] ?? "" }
 
     var isConfigured: Bool { config != nil }
 
@@ -104,23 +117,72 @@ public final class ChatStore {
         return []
     }
 
-    func applyServer(baseURL: String, apiKey: String) throws {
-        let parsed = try ServerConfig.parse(baseURL: baseURL, apiKey: apiKey)
-        baseURLText = parsed.baseURL.absoluteString
-        self.apiKey = parsed.apiKey ?? ""
-        defaults.set(baseURLText, forKey: Keys.baseURL)
-        Keychain.set(self.apiKey, for: Keys.apiKey)
+    /// Adds a new connection or replaces the one with the same ID. A new one becomes active.
+    func saveConnection(_ connection: Connection, apiKey: String) {
+        let isNew = !connections.contains { $0.id == connection.id }
+        if isNew {
+            connections.append(connection)
+        } else {
+            connections = connections.map { $0.id == connection.id ? connection : $0 }
+        }
+        apiKeys[connection.id] = apiKey.isEmpty ? nil : apiKey
+        secrets.set(connection.secretAccount, apiKey)
+        persistConnections()
+        if isNew || connection.id == activeConnectionID { activate(connection.id) }
     }
 
-    func updatePreferences(model: String? = nil, systemPrompt: String? = nil) {
-        if let model, model != self.model {
-            self.model = model
-            defaults.set(model, forKey: Keys.model)
-            checkEffortLevels()
+    func deleteConnection(_ id: UUID) {
+        guard let connection = connections.first(where: { $0.id == id }) else { return }
+        connections.removeAll { $0.id == id }
+        apiKeys[id] = nil
+        secrets.set(connection.secretAccount, "")
+        persistConnections()
+        if activeConnectionID == id {
+            if let next = connections.first { activate(next.id) } else { activate(nil) }
         }
-        if let systemPrompt {
-            self.systemPrompt = systemPrompt
-            defaults.set(systemPrompt, forKey: Keys.systemPrompt)
+    }
+
+    func activate(_ id: UUID?) {
+        activeConnectionID = id
+        defaults.set(id?.uuidString, forKey: Keys.activeConnection)
+        models = .idle
+        Task { await refreshModels() }
+    }
+
+    func selectModel(_ model: String) {
+        guard let index = connections.firstIndex(where: { $0.id == activeConnectionID }),
+              connections[index].model != model else { return }
+        connections[index].model = model
+        persistConnections()
+        checkEffortLevels()
+    }
+
+    private func persistConnections() {
+        defaults.set(try? JSONEncoder().encode(connections), forKey: Keys.connections)
+    }
+
+    private func loadConnections() {
+        if let data = defaults.data(forKey: Keys.connections),
+           let saved = try? JSONDecoder().decode([Connection].self, from: data) {
+            connections = saved
+            activeConnectionID = defaults.string(forKey: Keys.activeConnection).flatMap(UUID.init(uuidString:))
+                .flatMap { id in saved.contains { $0.id == id } ? id : nil } ?? saved.first?.id
+        } else if let url = defaults.string(forKey: LegacyKeys.baseURL),
+                  let parsed = try? ServerConfig.parse(baseURL: url, apiKey: "") {
+            let connection = Connection(name: Connection.address(of: parsed.baseURL), baseURL: parsed.baseURL,
+                                        model: defaults.string(forKey: LegacyKeys.model) ?? "",
+                                        systemPrompt: defaults.string(forKey: LegacyKeys.systemPrompt) ?? "")
+            let key = secrets.get(LegacyKeys.apiKey) ?? ""
+            connections = [connection]
+            activeConnectionID = connection.id
+            secrets.set(connection.secretAccount, key)
+            persistConnections()
+            defaults.set(connection.id.uuidString, forKey: Keys.activeConnection)
+            for legacy in [LegacyKeys.baseURL, LegacyKeys.model, LegacyKeys.systemPrompt] { defaults.removeObject(forKey: legacy) }
+            secrets.set(LegacyKeys.apiKey, "")
+        }
+        for connection in connections {
+            apiKeys[connection.id] = secrets.get(connection.secretAccount)
         }
     }
 
@@ -161,20 +223,23 @@ public final class ChatStore {
     }
 
     func refreshModels() async {
-        guard let config else {
+        guard let config, let connectionID = activeConnectionID else {
             models = .idle
+            effortLevels = .failed
             return
         }
         models = .loading
         do {
             let ids = try await ChatClient(config: config).models()
+            guard connectionID == activeConnectionID else { return }
             models = .loaded(ids)
             if !ids.contains(model), let first = ids.first {
-                updatePreferences(model: first)
+                selectModel(first)
             } else {
                 checkEffortLevels()
             }
         } catch {
+            guard connectionID == activeConnectionID else { return }
             models = .failed(error.localizedDescription)
             effortLevels = .failed
         }
