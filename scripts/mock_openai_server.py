@@ -10,9 +10,11 @@ A prompt starting with "/long" streams a long Markdown reply in irregular bursts
 On mock-reasoning, "/long" streams a long bursty reasoning section first.
 On mock-reasoning, "/huge" streams ~20k characters of reasoning then ~6k of Markdown, fast, as a load test.
 "/spans" streams inline formatting slowly, three characters at a time, to show half-finished spans.
+Image parts are acknowledged with their sizes, except by mock-think, which rejects them like a text-only model.
 Set MOCK_API_KEY to require `Authorization: Bearer <key>`. Set MOCK_EXTRA_MODELS=96 to list a long model list like OpenAI's.
 """
 import argparse
+import base64
 import json
 import os
 import random
@@ -24,6 +26,7 @@ MODELS = ["mock-chat", "mock-reasoning", "mock-ollama", "mock-think"]
 MODELS += [f"mock-extra-{i:03}" for i in range(int(os.environ.get("MOCK_EXTRA_MODELS", "0")))]
 # Like vLLM with the user's template. Other models ignore reasoning_effort, as llama.cpp does.
 EFFORTS = {"mock-reasoning": {"none", "low", "medium", "xhigh"}}
+TEXT_ONLY = {"mock-think"}
 
 
 def chunk(delta, finish=None):
@@ -126,9 +129,17 @@ class Handler(BaseHTTPRequestHandler):
         effort = body.get("reasoning_effort")
         if effort is not None and model in EFFORTS and effort not in EFFORTS[model]:
             return self.send_json(400, {"error": {"message": f"Unexpected reasoning effort {effort}."}})
-        last_user = next((m["content"] for m in reversed(body.get("messages", []))
-                          if m["role"] == "user"), "")
+        content = next((m["content"] for m in reversed(body.get("messages", []))
+                        if m["role"] == "user"), "")
+        parts = content if isinstance(content, list) else [{"type": "text", "text": content}]
+        last_user = " ".join(p["text"] for p in parts if p.get("type") == "text")
+        images = [p["image_url"]["url"] for p in parts if p.get("type") == "image_url"]
+        if images and model in TEXT_ONLY:
+            return self.send_json(400, {"error": {"message": f"{model} does not support image input."}})
         reply = f"You said: {last_user}"
+        if images:
+            sizes = ", ".join(f"{len(base64.b64decode(u.split(',', 1)[1])) // 1024} KB" for u in images)
+            reply = f"You sent {len(images)} image(s) ({sizes}) and said: {last_user or '(nothing)'}"
         if any(m["role"] == "system" and m["content"].startswith("You name chat conversations")
                for m in body.get("messages", [])):
             words = last_user.split("\n\n", 1)[-1].split()[:4]

@@ -31,6 +31,8 @@ Pick an iOS 17+ simulator or device and run the `LMChat` scheme. Add a connectio
 
 A bare host gets `http://` and `/v1` added. Anything with an explicit scheme or path is kept as typed (trailing slash trimmed).
 
+The photo button beside the message field attaches up to four photos. Each is downscaled to 1536 px on its long edge and sent as a JPEG `image_url` part, so the model has to accept images. A text-only model's refusal shows in the error banner.
+
 ## chatcli
 
 ```sh
@@ -38,9 +40,10 @@ swift run chatcli --base 127.0.0.1:1234 --models
 swift run chatcli --base 127.0.0.1:1234 --model <id> [--key K] [--effort low] "Hello"
 swift run chatcli --base 127.0.0.1:1234 --model <id> --efforts
 swift run chatcli --base 127.0.0.1:1234 --title "what is NVFP4?"
+swift run chatcli --base 127.0.0.1:1234 --model <id> --image photo.heic "What is in this photo?"
 ```
 
-Reasoning goes to stderr dimmed, the answer to stdout. Failures exit non-zero. `--title` prints the title the app would give a chat starting with that prompt. `--efforts` prints the reasoning effort levels the model accepts, the same check the app runs before showing its effort slider.
+Reasoning goes to stderr dimmed, the answer to stdout. Failures exit non-zero. `--title` prints the title the app would give a chat starting with that prompt. `--efforts` prints the reasoning effort levels the model accepts, the same check the app runs before showing its effort slider. `--image` attaches a photo, prepared the way the app prepares one, and can repeat.
 
 ## Smoke test against your server
 

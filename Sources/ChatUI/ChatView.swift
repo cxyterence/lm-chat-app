@@ -1,10 +1,12 @@
 import ChatCore
+import PhotosUI
 import SwiftUI
 
 struct ChatView: View {
     @Bindable var store: ChatStore
     let conversation: Conversation
     @State private var draft = ""
+    @State private var draftImages: [Data] = []
     @FocusState private var composerFocused: Bool
     @State private var atBottom = true
     @State private var following = true
@@ -19,8 +21,8 @@ struct ChatView: View {
             if let message = store.failureMessage(for: live.id) {
                 ErrorBanner(message: message, retry: store.retry, dismiss: store.dismissFailure)
             }
-            Composer(draft: $draft, focused: $composerFocused, streaming: streaming, canSend: store.canSend,
-                     send: send, stop: store.stop)
+            Composer(draft: $draft, images: $draftImages, focused: $composerFocused, streaming: streaming,
+                     canSend: store.canSend, send: send, stop: store.stop)
         }
         .foregroundStyle(palette.text)
         .background(palette.background.ignoresSafeArea())
@@ -91,8 +93,9 @@ struct ChatView: View {
     }
 
     private func send() {
-        store.send(draft)
+        store.send(draft, images: draftImages)
         draft = ""
+        draftImages = []
     }
 }
 
@@ -107,12 +110,17 @@ private struct MessageRow: View {
         case .user:
             HStack {
                 Spacer(minLength: 48)
-                Text(message.content)
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 12).padding(.vertical, 8)
-                    .background(palette.accent, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    .foregroundStyle(palette.onAccent)
-                    .contextMenu { Button("Copy", systemImage: "doc.on.doc") { copyToPasteboard(message.content) } }
+                VStack(alignment: .trailing, spacing: 6) {
+                    if !message.images.isEmpty { SentImages(images: message.images) }
+                    if !message.content.isEmpty {
+                        Text(message.content)
+                            .textSelection(.enabled)
+                            .padding(.horizontal, 12).padding(.vertical, 8)
+                            .background(palette.accent, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                            .foregroundStyle(palette.onAccent)
+                            .contextMenu { Button("Copy", systemImage: "doc.on.doc") { copyToPasteboard(message.content) } }
+                    }
+                }
             }
         case .assistant:
             HStack {
@@ -358,31 +366,48 @@ private struct ErrorBanner: View {
 
 private struct Composer: View {
     @Binding var draft: String
+    @Binding var images: [Data]
     var focused: FocusState<Bool>.Binding
     let streaming: Bool
     let canSend: Bool
     let send: () -> Void
     let stop: () -> Void
+    @State private var picks: [PhotosPickerItem] = []
+    @State private var loading = 0
     @Environment(\.palette) private var palette
 
+    private var isEmpty: Bool { draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && images.isEmpty }
+    private var room: Int { ImageAttachment.limit - images.count - loading }
+
     var body: some View {
-        HStack(alignment: .bottom, spacing: 8) {
-            TextField("Message", text: $draft, axis: .vertical)
-                .lineLimit(1...6)
-                .focused(focused)
-                .textFieldStyle(.plain)
-                .padding(.horizontal, 12).padding(.vertical, 8)
-                .foregroundStyle(palette.text)
-                .background(palette.fill, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            if streaming {
-                Button("Stop", systemImage: "stop.circle.fill", action: stop)
-                    .labelStyle(.iconOnly).font(.title)
-                    .foregroundStyle(palette.danger)
-            } else {
-                Button("Send", systemImage: "arrow.up.circle.fill", action: send)
-                    .labelStyle(.iconOnly).font(.title)
-                    .foregroundStyle(palette.accent)
-                    .disabled(!canSend || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        VStack(alignment: .leading, spacing: 8) {
+            if !images.isEmpty || loading > 0 { attachments }
+            HStack(alignment: .bottom, spacing: 8) {
+                PhotosPicker(selection: $picks, maxSelectionCount: max(room, 1), selectionBehavior: .ordered,
+                             matching: .images) {
+                    Label("Add Photos", systemImage: "photo.badge.plus")
+                        .labelStyle(.iconOnly).font(.title2)
+                        .frame(width: 36, height: 36)
+                }
+                .foregroundStyle(room > 0 ? palette.accent : palette.secondaryText)
+                .disabled(room <= 0)
+                TextField("Message", text: $draft, axis: .vertical)
+                    .lineLimit(1...6)
+                    .focused(focused)
+                    .textFieldStyle(.plain)
+                    .padding(.horizontal, 12).padding(.vertical, 8)
+                    .foregroundStyle(palette.text)
+                    .background(palette.fill, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                if streaming {
+                    Button("Stop", systemImage: "stop.circle.fill", action: stop)
+                        .labelStyle(.iconOnly).font(.title)
+                        .foregroundStyle(palette.danger)
+                } else {
+                    Button("Send", systemImage: "arrow.up.circle.fill", action: send)
+                        .labelStyle(.iconOnly).font(.title)
+                        .foregroundStyle(palette.accent)
+                        .disabled(!canSend || isEmpty || loading > 0)
+                }
             }
         }
         .buttonStyle(.plain)
@@ -390,6 +415,77 @@ private struct Composer: View {
         .background(palette.background)
         .overlay(alignment: .top) {
             Rectangle().fill(palette.secondaryText.opacity(0.3)).frame(height: 0.5)
+        }
+        .onChange(of: picks) { load() }
+    }
+
+    private var attachments: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                ForEach(Array(images.enumerated()), id: \.offset) { index, data in
+                    AttachmentImage(data: data, maxPixels: 240)
+                        .scaledToFill()
+                        .frame(width: 64, height: 64)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .accessibilityLabel("Photo \(index + 1)")
+                        .overlay(alignment: .topTrailing) {
+                            Button("Remove photo \(index + 1)", systemImage: "xmark.circle.fill") {
+                                images.remove(at: index)
+                            }
+                            .labelStyle(.iconOnly)
+                            .symbolRenderingMode(.palette)
+                            .foregroundStyle(.white, .black.opacity(0.6))
+                            .padding(4)
+                        }
+                }
+                ForEach(0..<loading, id: \.self) { _ in
+                    ProgressView()
+                        .frame(width: 64, height: 64)
+                        .background(palette.fill, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+            }
+        }
+        .scrollIndicators(.hidden)
+    }
+
+    private func load() {
+        let items = picks
+        guard !items.isEmpty else { return }
+        picks = []
+        loading += items.count
+        Task {
+            for item in items {
+                let data = try? await item.loadTransferable(type: Data.self)
+                let jpeg = await Task.detached { data.flatMap { ImageAttachment.jpeg(from: $0) } }.value
+                loading -= 1
+                if let jpeg { images.append(jpeg) }
+            }
+        }
+    }
+}
+
+/// A sent message's photos, one fitted to the bubble width or a row of squares when there are several.
+private struct SentImages: View {
+    let images: [Data]
+
+    var body: some View {
+        if images.count == 1 {
+            AttachmentImage(data: images[0])
+                .scaledToFit()
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .frame(maxWidth: 240, maxHeight: 320, alignment: .trailing)
+                .accessibilityLabel("Photo")
+        } else {
+            LazyVGrid(columns: [GridItem(.fixed(116)), GridItem(.fixed(116))], alignment: .trailing, spacing: 6) {
+                ForEach(Array(images.enumerated()), id: \.offset) { index, data in
+                    AttachmentImage(data: data, maxPixels: 360)
+                        .scaledToFill()
+                        .frame(width: 116, height: 116)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .accessibilityLabel("Photo \(index + 1)")
+                }
+            }
+            .frame(width: 238)
         }
     }
 }

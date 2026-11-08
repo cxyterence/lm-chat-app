@@ -10,6 +10,7 @@ struct Options {
     var listEfforts = false
     var effort: ReasoningEffort?
     var prompt: String?
+    var images: [String] = []
 }
 
 func write(_ text: String, to handle: FileHandle) {
@@ -21,7 +22,7 @@ func fail(_ message: String) -> Never {
     exit(1)
 }
 
-let usage = "usage: chatcli --base <url> [--key K] [--model M] [--models] [--efforts] [--title] [--effort <\(ReasoningEffort.allCases.map(\.rawValue).joined(separator: "|"))>] \"prompt\""
+let usage = "usage: chatcli --base <url> [--key K] [--model M] [--models] [--efforts] [--title] [--effort <\(ReasoningEffort.allCases.map(\.rawValue).joined(separator: "|"))>] [--image <file>]... \"prompt\""
 
 func parseOptions(_ args: [String]) -> Options {
     var options = Options()
@@ -41,6 +42,7 @@ func parseOptions(_ args: [String]) -> Options {
                 fail("invalid --effort \(raw). valid: \(ReasoningEffort.allCases.map(\.rawValue).joined(separator: ", "))")
             }
             options.effort = effort
+        case "--image": options.images.append(value(for: arg))
         case "--models": options.listModels = true
         case "--title": options.titleOnly = true
         case "--efforts": options.listEfforts = true
@@ -73,10 +75,17 @@ func run(_ options: Options) async throws {
         return
     }
 
+    let images = try options.images.map { path in
+        guard let jpeg = ImageAttachment.jpeg(from: try Data(contentsOf: URL(fileURLWithPath: path))) else {
+            fail("\(path) is not an image")
+        }
+        return jpeg
+    }
+
     var wroteReasoning = false
     for try await event in client.stream(
         model: model,
-        messages: [ChatMessage(role: .user, content: prompt)],
+        messages: [ChatMessage(role: .user, content: prompt, images: images)],
         reasoningEffort: options.effort
     ) {
         switch event {
