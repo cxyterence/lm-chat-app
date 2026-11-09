@@ -14,6 +14,8 @@ public struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
     public var reasoning: String
     /// Photos sent to the model alongside `content`.
     public var images: [ImageID]
+    /// Set on a user message sent with `/web-search`.
+    public var search: WebSearch?
     public var createdAt: Date
 
     public init(
@@ -22,6 +24,7 @@ public struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
         content: String,
         reasoning: String = "",
         images: [ImageID] = [],
+        search: WebSearch? = nil,
         createdAt: Date = Date()
     ) {
         self.id = id
@@ -29,6 +32,7 @@ public struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
         self.content = content
         self.reasoning = reasoning
         self.images = images
+        self.search = search
         self.createdAt = createdAt
     }
 
@@ -39,6 +43,7 @@ public struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
         content = try c.decode(String.self, forKey: .content)
         reasoning = try c.decode(String.self, forKey: .reasoning)
         images = try c.decodeIfPresent([ImageID].self, forKey: .images) ?? []
+        search = try c.decodeIfPresent(WebSearch.self, forKey: .search)
         createdAt = try c.decode(Date.self, forKey: .createdAt)
     }
 }

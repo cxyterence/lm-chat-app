@@ -9,6 +9,8 @@ final class LiveReply {
     let messageID: UUID
     var content = ""
     var reasoning = ""
+    /// What the reply is waiting on before any text arrives, like a web search.
+    var status: String?
 
     init(messageID: UUID) { self.messageID = messageID }
 }
@@ -51,6 +53,8 @@ public final class ChatStore {
         static let activeConnection = "activeConnection"
         static let reasoningEffort = "reasoningEffort"
         static let theme = "theme"
+        /// Points `/web-search` somewhere other than serper.dev, for testing against a local mock.
+        static let serperURL = "serperURL"
     }
 
     /// Settings from before connections existed, read once to build the first connection.
@@ -66,6 +70,7 @@ public final class ChatStore {
     private(set) var connections: [Connection] = []
     private(set) var activeConnectionID: UUID?
     private var apiKeys: [UUID: String] = [:]
+    private var serviceKeys: [APIService: String] = [:]
     private var preferredEffort: ReasoningEffort?
     private(set) var effortLevels: EffortLevels = .checking
     private(set) var theme: Theme
@@ -94,6 +99,7 @@ public final class ChatStore {
         preferredEffort = defaults.string(forKey: Keys.reasoningEffort).flatMap(ReasoningEffort.init(rawValue:))
         theme = defaults.string(forKey: Keys.theme).flatMap(Theme.init(rawValue:)) ?? .system
         loadConnections()
+        for service in APIService.allCases { serviceKeys[service] = secrets.get(service.secretAccount) }
         do {
             conversations = try ConversationStore.load(from: fileURL, images: images)
                 .sorted { $0.updatedAt > $1.updatedAt }
@@ -200,6 +206,14 @@ public final class ChatStore {
         for connection in connections {
             apiKeys[connection.id] = secrets.get(connection.secretAccount)
         }
+    }
+
+    func serviceKey(_ service: APIService) -> String { serviceKeys[service] ?? "" }
+
+    func setServiceKey(_ service: APIService, _ key: String) {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        serviceKeys[service] = trimmed.isEmpty ? nil : trimmed
+        secrets.set(service.secretAccount, trimmed)
     }
 
     /// What a request sends. Until the levels are known it's the saved choice, which the server accepted before.
@@ -313,14 +327,18 @@ public final class ChatStore {
         if selectedConversation == nil { newConversation() }
         guard let id = selection, let index = conversations.firstIndex(where: { $0.id == id }) else { return }
 
+        ask(ChatMessage(role: .user, content: trimmed, images: images), in: id, at: index)
+    }
+
+    private func ask(_ message: ChatMessage, in id: UUID, at index: Int) {
         let isFirstPrompt = conversations[index].messages.isEmpty
         if isFirstPrompt {
-            conversations[index].title = trimmed.isEmpty ? "Photo" : Conversation.title(fromFirstUserMessage: trimmed)
+            conversations[index].title = message.content.isEmpty ? "Photo" : Conversation.title(fromFirstUserMessage: message.content)
         }
         conversations[index].model = model
-        conversations[index].messages.append(ChatMessage(role: .user, content: trimmed, images: images))
+        conversations[index].messages.append(message)
         startStreaming(conversationID: id)
-        if isFirstPrompt && !trimmed.isEmpty { generateTitle(for: id, prompt: trimmed) }
+        if isFirstPrompt && !message.content.isEmpty { generateTitle(for: id, prompt: message.content) }
     }
 
     /// Replaces a sent message and asks again from there. Everything after it is erased, along with photos
@@ -337,6 +355,7 @@ public final class ChatStore {
         conversations[c].messages.removeSubrange((m + 1)...)
         conversations[c].messages[m].content = trimmed
         conversations[c].messages[m].images = images
+        if conversations[c].messages[m].search != nil { conversations[c].messages[m].search = WebSearch(query: trimmed) }
         conversations[c].model = model
         if case .failed(id, _, _) = generation { generation = .idle }
         persist()
@@ -379,14 +398,39 @@ public final class ChatStore {
         switch command {
         case .compact:
             Compaction.hasNewMessages(selectedConversation?.messages ?? []) ? nil : "Nothing to compact yet"
+        case .webSearch:
+            serviceKey(.serper).isEmpty ? "Add a Serper key in Settings › API Keys" : nil
         }
     }
 
     func run(_ command: SlashCommand, argument: String) {
-        guard canSend, unavailableReason(command) == nil, let id = selection else { return }
+        guard canSend, unavailableReason(command) == nil, !(command.needsArgument && argument.isEmpty) else { return }
+        if selectedConversation == nil { newConversation() }
+        guard let id = selection, let index = conversations.firstIndex(where: { $0.id == id }) else { return }
         switch command {
-        case .compact: startStreaming(conversationID: id, request: .compact(focus: argument))
+        case .compact:
+            startStreaming(conversationID: id, request: .compact(focus: argument))
+        case .webSearch:
+            ask(ChatMessage(role: .user, content: argument, search: WebSearch(query: argument)), in: id, at: index)
         }
+    }
+
+    /// Runs the pending `/web-search` on the newest user message, if it has one, and saves its results there.
+    private func searchIfNeeded(conversationID id: UUID) async throws {
+        guard let c = conversations.firstIndex(where: { $0.id == id }),
+              let m = conversations[c].messages.lastIndex(where: { $0.role == .user }),
+              let search = conversations[c].messages[m].search, search.results == nil
+        else { return }
+        let messageID = conversations[c].messages[m].id
+        liveReply?.status = "Searching the web…"
+        let baseURL = defaults.string(forKey: Keys.serperURL).flatMap(URL.init(string:)) ?? SerperClient.defaultBaseURL
+        let results = try await SerperClient(apiKey: serviceKey(.serper), baseURL: baseURL, session: session)
+            .search(search.query)
+        liveReply?.status = nil
+        guard let c = conversations.firstIndex(where: { $0.id == id }),
+              let m = conversations[c].messages.firstIndex(where: { $0.id == messageID })
+        else { return }
+        conversations[c].messages[m].search?.results = results
     }
 
     func dismissFailure() {
@@ -396,22 +440,23 @@ public final class ChatStore {
     private func startStreaming(conversationID id: UUID, request: Request = .reply) {
         guard let config, let index = conversations.firstIndex(where: { $0.id == id }) else { return }
 
-        let history = conversations[index].messages
-        let (wire, output) = switch request {
-        case .reply:
-            (Compaction.context(of: history, systemPrompt: systemPrompt), ChatMessage(role: .assistant, content: ""))
-        case .compact(let focus):
-            (Compaction.request(for: history, focus: focus), ChatMessage(role: .summary, content: ""))
-        }
+        let output = ChatMessage(role: request == .reply ? .assistant : .summary, content: "")
         conversations[index].messages.append(output)
         conversations[index].updatedAt = Date()
         liveReply = LiveReply(messageID: output.id)
 
-        let stream = ChatClient(config: config, session: session)
-            .stream(model: model, messages: wire, reasoningEffort: reasoningEffort, images: images)
+        let client = ChatClient(config: config, session: session)
+        let (model, effort, systemPrompt, images) = (model, reasoningEffort, systemPrompt, images)
         let task = Task { [weak self] in
             var outcome = Outcome.completed
             do {
+                try await self?.searchIfNeeded(conversationID: id)
+                let history = self?.conversations.first { $0.id == id }?.messages.filter { $0.id != output.id } ?? []
+                let wire = switch request {
+                case .reply: Compaction.context(of: history, systemPrompt: systemPrompt)
+                case .compact(let focus): Compaction.request(for: history, focus: focus)
+                }
+                let stream = client.stream(model: model, messages: wire, reasoningEffort: effort, images: images)
                 for try await event in stream {
                     self?.apply(event, to: output.id, in: id)
                     if case .done("length") = event, request != .reply {

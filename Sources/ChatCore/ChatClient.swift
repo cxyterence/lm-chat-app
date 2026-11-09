@@ -97,7 +97,7 @@ public struct ChatClient: Sendable {
             WireChatRequest(
                 model: model,
                 messages: messages.map {
-                    WireMessage(role: $0.role, content: $0.content,
+                    WireMessage(role: $0.role, content: $0.search?.prompt ?? $0.content,
                                 images: $0.images.compactMap { id in images?.data(for: id) })
                 },
                 stream: true,

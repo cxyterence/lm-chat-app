@@ -143,6 +143,11 @@ private struct MessageRow: View {
             HStack {
                 Spacer(minLength: 48)
                 VStack(alignment: .trailing, spacing: 6) {
+                    if message.search != nil {
+                        Label("Web search", systemImage: "globe")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(palette.secondaryText)
+                    }
                     if !message.images.isEmpty { SentImages(images: message.images.map(images.url)) }
                     if !message.content.isEmpty {
                         Text(message.content)
@@ -150,6 +155,7 @@ private struct MessageRow: View {
                             .background(palette.accent, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                             .foregroundStyle(palette.onAccent)
                     }
+                    if let results = message.search?.results, !results.isEmpty { SearchSources(results: results) }
                 }
                 #if os(iOS)
                 .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -216,11 +222,62 @@ private struct AssistantBubble: View {
                         .textSelection(.enabled)
                 }
             } else if isStreaming && reasoning.isEmpty {
-                TypingDots().transition(.opacity)
+                if let status = reply?.status {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text(status).font(.callout).foregroundStyle(palette.secondaryText)
+                    }
+                    .padding(.vertical, 4)
+                    .transition(.opacity)
+                } else {
+                    TypingDots().transition(.opacity)
+                }
             }
         }
         .contextMenu {
             Button("Copy", systemImage: "doc.on.doc") { copyToPasteboard(content) }
+        }
+    }
+}
+
+/// The pages a `/web-search` found, folded under the question until tapped.
+private struct SearchSources: View {
+    let results: [WebSearch.Result]
+    @State private var expanded = false
+    @Environment(\.palette) private var palette
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 6) {
+            Button {
+                withAnimation(.snappy(duration: 0.2)) { expanded.toggle() }
+            } label: {
+                Label("\(results.count) source\(results.count == 1 ? "" : "s")",
+                      systemImage: expanded ? "chevron.up" : "chevron.down")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(palette.accent)
+            }
+            .buttonStyle(.plain)
+            if expanded {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(Array(results.enumerated()), id: \.offset) { index, result in
+                        Link(destination: result.link) {
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text("\(index + 1)").font(.caption.monospacedDigit()).foregroundStyle(palette.secondaryText)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(result.title).font(.callout).foregroundStyle(palette.text).lineLimit(2)
+                                    Text(result.link.host() ?? result.link.absoluteString)
+                                        .font(.caption).foregroundStyle(palette.accent).lineLimit(1)
+                                }
+                                Spacer(minLength: 0)
+                            }
+                        }
+                    }
+                }
+                .padding(12)
+                .frame(maxWidth: 300)
+                .background(palette.fill, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
         }
     }
 }
@@ -473,7 +530,11 @@ private struct Composer: View {
 
     private var isEmpty: Bool { draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && images.isEmpty }
     /// Commands aren't run from an edit, which always resends the text as written.
-    private var command: SlashCommand? { editing ? nil : SlashCommand.parse(draft)?.command }
+    private var parsed: (command: SlashCommand, argument: String)? { editing ? nil : SlashCommand.parse(draft) }
+    private var commandReady: Bool {
+        guard let parsed else { return true }
+        return unavailable(parsed.command) == nil && !(parsed.command.needsArgument && parsed.argument.isEmpty)
+    }
     private var suggestions: [SlashCommand] { editing ? [] : SlashCommand.suggestions(for: draft) }
     private var room: Int { ImageAttachment.limit - images.count - loading }
 
@@ -506,7 +567,7 @@ private struct Composer: View {
                         .labelStyle(.iconOnly)
                     }
                 } else {
-                    let ready = canSend && !isEmpty && loading == 0 && command.flatMap(unavailable) == nil
+                    let ready = canSend && !isEmpty && loading == 0 && commandReady
                     Button(action: send) {
                         Label { Text("Send") } icon: {
                             CircleIcon(systemImage: "arrow.up", size: height, foreground: palette.onAccent,

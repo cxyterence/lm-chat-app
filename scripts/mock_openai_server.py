@@ -15,6 +15,7 @@ Set MOCK_API_KEY to require `Authorization: Bearer <key>`. Set MOCK_EXTRA_MODELS
 """
 import argparse
 import base64
+import re
 import json
 import os
 import random
@@ -117,7 +118,22 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_json(404, {"error": {"message": "not found"}})
 
+    def search(self):
+        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+        if not self.headers.get("X-API-KEY"):
+            return self.send_json(403, {"message": "Unauthorized."})
+        q = body.get("q", "")
+        self.send_json(200, {
+            "searchParameters": {"q": q},
+            "answerBox": {"title": f"{q} (featured)", "answer": f"The short answer about {q}.",
+                          "link": "https://example.com/featured"},
+            "organic": [{"title": f"{q} result {i}", "link": f"https://example.com/{i}",
+                         "snippet": f"Snippet {i} about {q}.", "position": i} for i in range(1, 4)],
+        })
+
     def do_POST(self):
+        if self.path.rstrip("/") == "/search":
+            return self.search()
         if not self.authorized():
             return
         if self.path.rstrip("/") != "/v1/chat/completions":
@@ -137,6 +153,10 @@ class Handler(BaseHTTPRequestHandler):
         if images and model in TEXT_ONLY:
             return self.send_json(400, {"error": {"message": f"{model} does not support image input."}})
         reply = f"You said: {last_user}"
+        if last_user.startswith("Answer using these web search results"):
+            sources = re.findall(r"^\[(\d+)\] .*\n(\S+)$", last_user, re.M)
+            question = last_user.rsplit("Question: ", 1)[-1]
+            reply = f"From {len(sources)} results about {question}: see [1]({sources[0][1]}) and [2]({sources[1][1]})."
         if images:
             sizes = ", ".join(f"{len(base64.b64decode(u.split(',', 1)[1])) // 1024} KB" for u in images)
             reply = f"You sent {len(images)} image(s) ({sizes}) and said: {last_user or '(nothing)'}"

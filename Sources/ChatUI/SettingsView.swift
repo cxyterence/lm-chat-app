@@ -2,13 +2,19 @@ import ChatCore
 import SwiftUI
 
 enum SettingsPage: String, CaseIterable, Identifiable {
-    case connections, appearance
+    case connections, apiKeys, appearance
 
     var id: Self { self }
-    var title: String { rawValue.capitalized }
+    var title: String {
+        switch self {
+        case .apiKeys: "API Keys"
+        default: rawValue.capitalized
+        }
+    }
     var systemImage: String {
         switch self {
         case .connections: "network"
+        case .apiKeys: "key"
         case .appearance: "paintpalette"
         }
     }
@@ -54,6 +60,7 @@ struct SettingsView: View {
                 Group {
                     switch page {
                     case .connections: ConnectionsSettings(store: store) { path.append($0) }
+                    case .apiKeys: APIKeysSettings(store: store)
                     case .appearance: AppearanceSettings(store: store)
                     }
                 }
@@ -73,6 +80,8 @@ struct SettingsView: View {
     private func summary(_ page: SettingsPage) -> String {
         switch page {
         case .connections: store.activeConnection?.name ?? "Not set"
+        case .apiKeys:
+            APIService.allCases.filter { !store.serviceKey($0).isEmpty }.map(\.name).joined(separator: ", ")
         case .appearance: store.theme.name
         }
     }
@@ -276,5 +285,54 @@ struct ConnectionEditor: View {
         connection.systemPrompt = systemPrompt
         store.saveConnection(connection, apiKey: parsed.apiKey ?? "")
         dismiss()
+    }
+}
+
+struct APIKeysSettings: View {
+    let store: ChatStore
+    @Environment(\.palette) private var palette
+
+    var body: some View {
+        Form {
+            ForEach(APIService.allCases) { service in
+                ServiceKeyRow(store: store, service: service)
+            }
+        }
+        .formStyle(.grouped)
+        .foregroundStyle(palette.text)
+        .scrollContentBackground(.hidden)
+    }
+}
+
+/// Saves as you type, so there's no Save button to forget.
+private struct ServiceKeyRow: View {
+    let store: ChatStore
+    let service: APIService
+    @State private var key = ""
+    @Environment(\.palette) private var palette
+
+    var body: some View {
+        Section {
+            SecureField("\(service.name) API key", text: $key)
+                .autocorrectionDisabled()
+                #if os(iOS)
+                .textInputAutocapitalization(.never)
+                #endif
+                .onChange(of: key) { store.setServiceKey(service, key) }
+            Link("Get a \(service.name) key", destination: service.signupURL).foregroundStyle(palette.accent)
+        } header: {
+            HStack {
+                Text(service.name)
+                Spacer()
+                if !store.serviceKey(service).isEmpty {
+                    Label("Saved", systemImage: "checkmark.circle.fill").labelStyle(.titleAndIcon)
+                        .foregroundStyle(palette.success)
+                }
+            }
+        } footer: {
+            Text(service.purpose + " Stored in the Keychain on this device.")
+        }
+        .listRowBackground(palette.surface)
+        .onAppear { key = store.serviceKey(service) }
     }
 }

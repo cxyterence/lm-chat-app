@@ -1,20 +1,26 @@
 /// A command typed at the start of the composer, like `/compact`.
 public enum SlashCommand: String, CaseIterable, Sendable {
     case compact
+    case webSearch = "web-search"
 
     public var name: String { "/" + rawValue }
 
     public var argumentHint: String {
         switch self {
         case .compact: "[what to keep]"
+        case .webSearch: "<query>"
         }
     }
 
     public var summary: String {
         switch self {
         case .compact: "Summarize the chat so far to free up the model's context"
+        case .webSearch: "Search the web and answer from the results"
         }
     }
+
+    /// Whether the command does nothing without text after its name.
+    public var needsArgument: Bool { self == .webSearch }
 
     /// The command a draft runs and the text after its name. nil for an ordinary message, including one that
     /// starts with a slash but names no command, so "/etc/hosts is missing" still reaches the model.

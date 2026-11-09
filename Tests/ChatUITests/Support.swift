@@ -49,15 +49,23 @@ final class StubServer: @unchecked Sendable {
 
     let host = "stub-\(UUID().uuidString.lowercased()).test"
     private let respond: @Sendable ([String: Any]) -> Reply
+    private let search: @Sendable (String) -> Reply
     private let lock = NSLock()
     private var received: [[String: Any]] = []
+    private var queries: [String] = []
 
-    init(respond: @escaping @Sendable ([String: Any]) -> Reply) {
+    /// `search` answers Serper's /search with the query it was sent.
+    init(search: @escaping @Sendable (String) -> Reply = { _ in (404, "") },
+         respond: @escaping @Sendable ([String: Any]) -> Reply) {
         self.respond = respond
+        self.search = search
         StubProtocol.register(self)
     }
 
-    /// Bodies of streamed chat requests, oldest first.
+    var searches: [String] { lock.withLock { queries } }
+    var root: URL { URL(string: "http://\(host)")! }
+
+    /// Bodies of streamed chat requests, oldest first. Title requests are answered "Stub Title" and left out.
     var chats: [[String: Any]] { lock.withLock { received } }
 
     var session: URLSession {
@@ -69,7 +77,13 @@ final class StubServer: @unchecked Sendable {
     var baseURL: URL { URL(string: "http://\(host)/v1")! }
 
     fileprivate func handle(path: String, body: [String: Any]) -> Reply {
+        if path == "/search" {
+            let query = body["q"] as? String ?? ""
+            lock.withLock { queries.append(query) }
+            return search(query)
+        }
         guard path.hasSuffix("chat/completions"), body["stream"] as? Bool == true else { return (404, "") }
+        if transcript(body).first?.text.hasPrefix("You name chat conversations") == true { return (200, sse(["Stub Title"])) }
         lock.withLock { received.append(body) }
         return respond(body)
     }
@@ -148,4 +162,17 @@ func echoServer() -> StubServer {
 @MainActor
 func untilIdle(_ store: ChatStore) async {
     while store.isBusy { try? await Task.sleep(for: .milliseconds(5)) }
+}
+
+func serperPage(_ titles: [String]) -> String {
+    let organic = titles.enumerated().map { index, title in
+        ["title": title, "link": "https://example.com/\(index)", "snippet": "About \(title)."]
+    }
+    return String(decoding: try! JSONSerialization.data(withJSONObject: ["organic": organic]), as: UTF8.self)
+}
+
+@MainActor
+func useSerper(_ store: ChatStore, at server: StubServer) {
+    store.defaults.set(server.root.absoluteString, forKey: "serperURL")
+    store.setServiceKey(.serper, "test-key")
 }
