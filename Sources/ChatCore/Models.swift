@@ -2,6 +2,9 @@ import Foundation
 
 public enum Role: String, Codable, Sendable {
     case system, user, assistant
+    /// A `/compact` summary standing in for everything before it. Never sent as is: `Compaction.context`
+    /// folds it into the system message.
+    case summary
 }
 
 public struct ChatMessage: Identifiable, Codable, Equatable, Sendable {

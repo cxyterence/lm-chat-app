@@ -35,6 +35,8 @@ The photo button beside the message field attaches up to four photos. Each is do
 
 Long-press a message you sent and choose Edit to change it. Sending the edit asks the model again from that point and erases everything after it. Photos only the erased messages used are deleted.
 
+Type `/` in the message field to see commands. `/compact` asks the model to summarize the chat so far, then sends that summary in place of the earlier messages, which stay on screen. Text after the command, like `/compact keep the code`, tells it what to make sure it keeps. A summary that fails, is stopped, or hits the model's output limit is thrown away so no history is lost. A message that starts with `/` but names no command is sent as ordinary text.
+
 ## chatcli
 
 ```sh

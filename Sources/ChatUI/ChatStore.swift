@@ -15,10 +15,21 @@ final class LiveReply {
 
 @MainActor @Observable
 public final class ChatStore {
+    /// What a stream produces, kept with a failure so Retry asks for the same thing.
+    enum Request: Equatable {
+        case reply
+        case compact(focus: String)
+    }
+
     enum Generation {
         case idle
         case streaming(conversationID: UUID, task: Task<Void, Never>)
-        case failed(conversationID: UUID, message: String)
+        case failed(conversationID: UUID, message: String, request: Request)
+    }
+
+    private enum Outcome: Equatable {
+        case completed, cancelled
+        case failed(String)
     }
 
     enum ModelsState: Equatable {
@@ -289,7 +300,7 @@ public final class ChatStore {
     }
 
     func failureMessage(for id: UUID) -> String? {
-        if case .failed(let failedID, let message) = generation, failedID == id { return message }
+        if case .failed(let failedID, let message, _) = generation, failedID == id { return message }
         return nil
     }
 
@@ -327,7 +338,7 @@ public final class ChatStore {
         conversations[c].messages[m].content = trimmed
         conversations[c].messages[m].images = images
         conversations[c].model = model
-        if case .failed(id, _) = generation { generation = .idle }
+        if case .failed(id, _, _) = generation { generation = .idle }
         persist()
         self.images.remove(dropped)
         startStreaming(conversationID: id)
@@ -351,41 +362,67 @@ public final class ChatStore {
     }
 
     func retry() {
-        guard case .failed(let id, _) = generation, let index = conversations.firstIndex(where: { $0.id == id }),
-              let lastUser = conversations[index].messages.lastIndex(where: { $0.role == .user })
+        guard case .failed(let id, _, let request) = generation,
+              let index = conversations.firstIndex(where: { $0.id == id })
         else { return }
-        conversations[index].messages.removeSubrange((lastUser + 1)...)
-        startStreaming(conversationID: id)
+        if request == .reply {
+            guard let lastUser = conversations[index].messages.lastIndex(where: { $0.role == .user }) else { return }
+            conversations[index].messages.removeSubrange((lastUser + 1)...)
+        }
+        startStreaming(conversationID: id, request: request)
+    }
+
+    // MARK: Commands
+
+    /// Why a command can't run in the selected chat right now, or nil when it can.
+    func unavailableReason(_ command: SlashCommand) -> String? {
+        switch command {
+        case .compact:
+            Compaction.hasNewMessages(selectedConversation?.messages ?? []) ? nil : "Nothing to compact yet"
+        }
+    }
+
+    func run(_ command: SlashCommand, argument: String) {
+        guard canSend, unavailableReason(command) == nil, let id = selection else { return }
+        switch command {
+        case .compact: startStreaming(conversationID: id, request: .compact(focus: argument))
+        }
     }
 
     func dismissFailure() {
         if case .failed = generation { generation = .idle }
     }
 
-    private func startStreaming(conversationID id: UUID) {
+    private func startStreaming(conversationID id: UUID, request: Request = .reply) {
         guard let config, let index = conversations.firstIndex(where: { $0.id == id }) else { return }
 
-        var wire = conversations[index].messages
-        if !systemPrompt.isEmpty {
-            wire.insert(ChatMessage(role: .system, content: systemPrompt), at: 0)
+        let history = conversations[index].messages
+        let (wire, output) = switch request {
+        case .reply:
+            (Compaction.context(of: history, systemPrompt: systemPrompt), ChatMessage(role: .assistant, content: ""))
+        case .compact(let focus):
+            (Compaction.request(for: history, focus: focus), ChatMessage(role: .summary, content: ""))
         }
-        let assistant = ChatMessage(role: .assistant, content: "")
-        conversations[index].messages.append(assistant)
+        conversations[index].messages.append(output)
         conversations[index].updatedAt = Date()
-        liveReply = LiveReply(messageID: assistant.id)
+        liveReply = LiveReply(messageID: output.id)
 
-        let stream = ChatClient(config: config, session: session).stream(model: model, messages: wire, reasoningEffort: reasoningEffort,
-                                                       images: images)
+        let stream = ChatClient(config: config, session: session)
+            .stream(model: model, messages: wire, reasoningEffort: reasoningEffort, images: images)
         let task = Task { [weak self] in
-            var failure: String?
+            var outcome = Outcome.completed
             do {
                 for try await event in stream {
-                    self?.apply(event, to: assistant.id, in: id)
+                    self?.apply(event, to: output.id, in: id)
+                    if case .done("length") = event, request != .reply {
+                        outcome = .failed("The summary was cut off by the model's output limit.")
+                    }
                 }
+                if Task.isCancelled { outcome = .cancelled }
             } catch {
-                if !Task.isCancelled { failure = error.localizedDescription }
+                outcome = Task.isCancelled ? .cancelled : .failed(error.localizedDescription)
             }
-            self?.finish(conversationID: id, assistantID: assistant.id, failure: failure)
+            self?.finish(conversationID: id, messageID: output.id, request: request, outcome: outcome)
         }
         generation = .streaming(conversationID: id, task: task)
     }
@@ -399,21 +436,32 @@ public final class ChatStore {
         }
     }
 
-    private func finish(conversationID id: UUID, assistantID: UUID, failure: String?) {
+    /// A reply keeps whatever arrived. A summary is all or nothing, since a partial one would silently drop
+    /// the rest of the history from what the model sees.
+    private func finish(conversationID id: UUID, messageID: UUID, request: Request, outcome: Outcome) {
+        var outcome = outcome
         if let c = conversations.firstIndex(where: { $0.id == id }),
-           let m = conversations[c].messages.firstIndex(where: { $0.id == assistantID }) {
-            if let reply = liveReply, reply.messageID == assistantID {
+           let m = conversations[c].messages.firstIndex(where: { $0.id == messageID }) {
+            if let reply = liveReply, reply.messageID == messageID {
                 conversations[c].messages[m].content = reply.content
                 conversations[c].messages[m].reasoning = reply.reasoning
             }
             let message = conversations[c].messages[m]
-            if message.content.isEmpty && message.reasoning.isEmpty {
-                conversations[c].messages.remove(at: m)
+            if message.role == .summary, outcome == .completed, message.content.isEmpty {
+                outcome = .failed("The model returned an empty summary.")
             }
+            let keep = message.role == .summary
+                ? outcome == .completed
+                : !(message.content.isEmpty && message.reasoning.isEmpty)
+            if !keep { conversations[c].messages.remove(at: m) }
             conversations[c].updatedAt = Date()
         }
-        if liveReply?.messageID == assistantID { liveReply = nil }
-        generation = failure.map { .failed(conversationID: id, message: $0) } ?? .idle
+        if liveReply?.messageID == messageID { liveReply = nil }
+        if case .failed(let message) = outcome {
+            generation = .failed(conversationID: id, message: message, request: request)
+        } else {
+            generation = .idle
+        }
         persist()
     }
 

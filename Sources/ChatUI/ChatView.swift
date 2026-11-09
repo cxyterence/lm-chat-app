@@ -24,7 +24,8 @@ struct ChatView: View {
                 ErrorBanner(message: message, retry: store.retry, dismiss: store.dismissFailure)
             }
             Composer(draft: $draft, images: $draftImages, store: store.images, focused: $composerFocused, streaming: streaming,
-                     canSend: store.canSend, editing: editing != nil, send: send, stop: store.stop, cancelEdit: cancelEdit)
+                     canSend: store.canSend, editing: editing != nil, unavailable: store.unavailableReason,
+                     send: send, stop: store.stop, cancelEdit: cancelEdit)
         }
         .foregroundStyle(palette.text)
         .background(palette.background.ignoresSafeArea())
@@ -102,6 +103,9 @@ struct ChatView: View {
             store.edit(editing.id, to: draft, images: draftImages)
             (draft, draftImages) = editing.stash
             self.editing = nil
+        } else if let (command, argument) = SlashCommand.parse(draft) {
+            store.run(command, argument: argument)
+            draft = ""
         } else {
             store.send(draft, images: draftImages)
             draft = ""
@@ -162,6 +166,8 @@ private struct MessageRow: View {
                 AssistantBubble(message: message, isStreaming: isStreaming, reply: reply)
                 Spacer(minLength: 48)
             }
+        case .summary:
+            SummaryCard(message: message, isStreaming: isStreaming, reply: reply)
         case .system:
             EmptyView()
         }
@@ -216,6 +222,54 @@ private struct AssistantBubble: View {
         .contextMenu {
             Button("Copy", systemImage: "doc.on.doc") { copyToPasteboard(content) }
         }
+    }
+}
+
+/// Marks where `/compact` replaced the history. The summary stays folded away unless asked for.
+private struct SummaryCard: View {
+    let message: ChatMessage
+    let isStreaming: Bool
+    let reply: LiveReply?
+    @State private var expanded = false
+    @Environment(\.palette) private var palette
+
+    private var content: String { reply?.content ?? message.content }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                line
+                Label(isStreaming ? "Compacting…" : "Chat compacted", systemImage: "rectangle.compress.vertical")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(palette.secondaryText)
+                    .fixedSize()
+                line
+            }
+            DisclosureGroup(isExpanded: $expanded) {
+                Paced(text: content, live: isStreaming) { text, unfinished in
+                    MarkdownView(text: unfinished ? Markdown.completingPartial(text) : text)
+                        .font(.callout)
+                        .foregroundStyle(palette.text)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .padding(.top, 6)
+            } label: {
+                Text(isStreaming ? "Writing a summary of the chat so far" : "Earlier messages are summarized for the model")
+                    .font(.subheadline)
+                    .foregroundStyle(palette.secondaryText)
+            }
+            .padding(12)
+            .background(palette.fill, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .padding(.vertical, 4)
+        .contextMenu {
+            if !content.isEmpty { Button("Copy Summary", systemImage: "doc.on.doc") { copyToPasteboard(content) } }
+        }
+    }
+
+    private var line: some View {
+        Rectangle().fill(palette.secondaryText.opacity(0.3)).frame(height: 0.5)
     }
 }
 
@@ -407,6 +461,7 @@ private struct Composer: View {
     let streaming: Bool
     let canSend: Bool
     let editing: Bool
+    let unavailable: (SlashCommand) -> String?
     let send: () -> Void
     let stop: () -> Void
     let cancelEdit: () -> Void
@@ -417,11 +472,15 @@ private struct Composer: View {
     @Environment(\.palette) private var palette
 
     private var isEmpty: Bool { draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && images.isEmpty }
+    /// Commands aren't run from an edit, which always resends the text as written.
+    private var command: SlashCommand? { editing ? nil : SlashCommand.parse(draft)?.command }
+    private var suggestions: [SlashCommand] { editing ? [] : SlashCommand.suggestions(for: draft) }
     private var room: Int { ImageAttachment.limit - images.count - loading }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if editing { editingBar }
+            if !suggestions.isEmpty { commandList }
             if !images.isEmpty || loading > 0 { attachments }
             HStack(alignment: .bottom, spacing: 8) {
                 let plus = CircleIcon(systemImage: "plus", size: height,
@@ -447,7 +506,7 @@ private struct Composer: View {
                         .labelStyle(.iconOnly)
                     }
                 } else {
-                    let ready = canSend && !isEmpty && loading == 0
+                    let ready = canSend && !isEmpty && loading == 0 && command.flatMap(unavailable) == nil
                     Button(action: send) {
                         Label { Text("Send") } icon: {
                             CircleIcon(systemImage: "arrow.up", size: height, foreground: palette.onAccent,
@@ -466,6 +525,35 @@ private struct Composer: View {
             Rectangle().fill(palette.secondaryText.opacity(0.3)).frame(height: 0.5)
         }
         .onChange(of: picks) { load() }
+    }
+
+    private var commandList: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(suggestions, id: \.self) { command in
+                let reason = unavailable(command)
+                Button {
+                    if !draft.contains(where: \.isWhitespace) { draft = command.name + " " }
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(command.name).font(.body.monospaced().weight(.semibold))
+                                .foregroundStyle(reason == nil ? palette.accent : palette.secondaryText)
+                            Text(command.argumentHint).font(.callout.monospaced()).foregroundStyle(palette.secondaryText)
+                        }
+                        Text(reason ?? command.summary).font(.caption)
+                            .foregroundStyle(reason == nil ? palette.secondaryText : palette.danger)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 6)
+                    .contentShape(Rectangle())
+                }
+                .accessibilityLabel(command.name)
+                .accessibilityHint(reason ?? command.summary)
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 4)
+        .background(palette.fill, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .transition(.move(edge: .bottom).combined(with: .opacity))
     }
 
     private var editingBar: some View {
