@@ -7,6 +7,8 @@ struct ChatView: View {
     let conversation: Conversation
     @State private var draft = ""
     @State private var draftImages: [ImageID] = []
+    /// The sent message being rewritten, and the draft it pushed aside.
+    @State private var editing: (id: UUID, stash: (text: String, images: [ImageID]))?
     @FocusState private var composerFocused: Bool
     @State private var atBottom = true
     @State private var following = true
@@ -22,7 +24,7 @@ struct ChatView: View {
                 ErrorBanner(message: message, retry: store.retry, dismiss: store.dismissFailure)
             }
             Composer(draft: $draft, images: $draftImages, store: store.images, focused: $composerFocused, streaming: streaming,
-                     canSend: store.canSend, send: send, stop: store.stop)
+                     canSend: store.canSend, editing: editing != nil, send: send, stop: store.stop, cancelEdit: cancelEdit)
         }
         .foregroundStyle(palette.text)
         .background(palette.background.ignoresSafeArea())
@@ -38,9 +40,12 @@ struct ChatView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(spacing: 12) {
-                    ForEach(live.messages) { message in
+                    let erased = editing.flatMap { edit in live.messages.firstIndex { $0.id == edit.id } }
+                    ForEach(Array(live.messages.enumerated()), id: \.element.id) { index, message in
                         let isLive = streaming && message.id == live.messages.last?.id
-                        MessageRow(message: message, images: store.images, isStreaming: isLive, reply: isLive ? store.liveReply : nil)
+                        MessageRow(message: message, images: store.images, isStreaming: isLive, reply: isLive ? store.liveReply : nil,
+                                   edit: store.canSend ? { beginEditing(message) } : nil)
+                            .opacity(erased.map { index > $0 } == true ? 0.35 : 1)
                             .transition(.opacity.combined(with: .offset(y: 12)))
                     }
                     Color.clear.frame(height: 1).id("bottom")
@@ -93,9 +98,29 @@ struct ChatView: View {
     }
 
     private func send() {
-        store.send(draft, images: draftImages)
-        draft = ""
-        draftImages = []
+        if let editing {
+            store.edit(editing.id, to: draft, images: draftImages)
+            (draft, draftImages) = editing.stash
+            self.editing = nil
+        } else {
+            store.send(draft, images: draftImages)
+            draft = ""
+            draftImages = []
+        }
+    }
+
+    private func beginEditing(_ message: ChatMessage) {
+        let stash = editing?.stash ?? (draft, draftImages)
+        withAnimation(.snappy(duration: 0.2)) { editing = (message.id, stash) }
+        draft = message.content
+        draftImages = message.images
+        composerFocused = true
+    }
+
+    private func cancelEdit() {
+        guard let editing else { return }
+        (draft, draftImages) = editing.stash
+        withAnimation(.snappy(duration: 0.2)) { self.editing = nil }
     }
 }
 
@@ -104,6 +129,8 @@ private struct MessageRow: View {
     let images: ImageStore
     let isStreaming: Bool
     let reply: LiveReply?
+    /// nil while a reply is streaming, when the message can't be changed.
+    let edit: (() -> Void)?
     @Environment(\.palette) private var palette
 
     var body: some View {
@@ -115,11 +142,18 @@ private struct MessageRow: View {
                     if !message.images.isEmpty { SentImages(images: message.images.map(images.url)) }
                     if !message.content.isEmpty {
                         Text(message.content)
-                            .textSelection(.enabled)
                             .padding(.horizontal, 12).padding(.vertical, 8)
                             .background(palette.accent, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                             .foregroundStyle(palette.onAccent)
-                            .contextMenu { Button("Copy", systemImage: "doc.on.doc") { copyToPasteboard(message.content) } }
+                    }
+                }
+                #if os(iOS)
+                .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 16, style: .continuous))
+                #endif
+                .contextMenu {
+                    if let edit { Button("Edit", systemImage: "pencil", action: edit) }
+                    if !message.content.isEmpty {
+                        Button("Copy", systemImage: "doc.on.doc") { copyToPasteboard(message.content) }
                     }
                 }
             }
@@ -372,8 +406,10 @@ private struct Composer: View {
     var focused: FocusState<Bool>.Binding
     let streaming: Bool
     let canSend: Bool
+    let editing: Bool
     let send: () -> Void
     let stop: () -> Void
+    let cancelEdit: () -> Void
     @State private var picks: [PhotosPickerItem] = []
     @State private var loading = 0
     /// One line of body text plus the field's vertical padding, so both buttons are exactly as tall as the empty field.
@@ -385,6 +421,7 @@ private struct Composer: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if editing { editingBar }
             if !images.isEmpty || loading > 0 { attachments }
             HStack(alignment: .bottom, spacing: 8) {
                 let plus = CircleIcon(systemImage: "plus", size: height,
@@ -429,6 +466,19 @@ private struct Composer: View {
             Rectangle().fill(palette.secondaryText.opacity(0.3)).frame(height: 0.5)
         }
         .onChange(of: picks) { load() }
+    }
+
+    private var editingBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "pencil").foregroundStyle(palette.accent)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Editing message").font(.subheadline.weight(.semibold))
+                Text("Sending replaces everything after it.").font(.caption).foregroundStyle(palette.secondaryText)
+            }
+            Spacer()
+            Button("Cancel", action: cancelEdit).font(.subheadline).foregroundStyle(palette.accent)
+        }
+        .transition(.move(edge: .bottom).combined(with: .opacity))
     }
 
     private var attachments: some View {

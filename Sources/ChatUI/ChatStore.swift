@@ -68,15 +68,17 @@ public final class ChatStore {
     @ObservationIgnored private var effortCheck: Task<Void, Never>?
     @ObservationIgnored private let fileURL: URL
     @ObservationIgnored let images: ImageStore
+    @ObservationIgnored private let session: URLSession
 
     public convenience init() {
         self.init(defaults: .standard, fileURL: ChatStore.defaultFileURL, secrets: .keychain)
     }
 
-    init(defaults: UserDefaults, fileURL: URL, secrets: Secrets) {
+    init(defaults: UserDefaults, fileURL: URL, secrets: Secrets, session: URLSession = .shared) {
         self.defaults = defaults
         self.fileURL = fileURL
         self.secrets = secrets
+        self.session = session
         images = ImageStore(directory: fileURL.deletingLastPathComponent().appendingPathComponent("images"))
         preferredEffort = defaults.string(forKey: Keys.reasoningEffort).flatMap(ReasoningEffort.init(rawValue:))
         theme = defaults.string(forKey: Keys.theme).flatMap(Theme.init(rawValue:)) ?? .system
@@ -211,7 +213,7 @@ public final class ChatStore {
         effortCheck = Task {
             let result: EffortLevels
             do {
-                result = .known(try await ChatClient(config: config).reasoningEfforts(model: model))
+                result = .known(try await ChatClient(config: config, session: session).reasoningEfforts(model: model))
             } catch {
                 result = .failed
             }
@@ -233,7 +235,7 @@ public final class ChatStore {
         }
         models = .loading
         do {
-            let ids = try await ChatClient(config: config).models()
+            let ids = try await ChatClient(config: config, session: session).models()
             guard connectionID == activeConnectionID else { return }
             models = .loaded(ids)
             if !ids.contains(model), let first = ids.first {
@@ -310,10 +312,31 @@ public final class ChatStore {
         if isFirstPrompt && !trimmed.isEmpty { generateTitle(for: id, prompt: trimmed) }
     }
 
+    /// Replaces a sent message and asks again from there. Everything after it is erased, along with photos
+    /// no message uses any more.
+    func edit(_ messageID: UUID, to text: String, images: [ImageID] = []) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty || !images.isEmpty, canSend, let id = selection,
+              let c = conversations.firstIndex(where: { $0.id == id }),
+              let m = conversations[c].messages.firstIndex(where: { $0.id == messageID }),
+              conversations[c].messages[m].role == .user
+        else { return }
+
+        let dropped = conversations[c].messages[m...].flatMap(\.images).filter { !images.contains($0) }
+        conversations[c].messages.removeSubrange((m + 1)...)
+        conversations[c].messages[m].content = trimmed
+        conversations[c].messages[m].images = images
+        conversations[c].model = model
+        if case .failed(id, _) = generation { generation = .idle }
+        persist()
+        self.images.remove(dropped)
+        startStreaming(conversationID: id)
+    }
+
     /// Runs beside the reply. The first-line title stays if the model gives nothing usable.
     private func generateTitle(for id: UUID, prompt: String) {
         guard let config else { return }
-        let client = ChatClient(config: config), model = model
+        let client = ChatClient(config: config, session: session), model = model
         Task { [weak self] in
             guard let title = try? await client.title(model: model, for: prompt),
                   let self, let index = self.conversations.firstIndex(where: { $0.id == id })
@@ -351,7 +374,7 @@ public final class ChatStore {
         conversations[index].updatedAt = Date()
         liveReply = LiveReply(messageID: assistant.id)
 
-        let stream = ChatClient(config: config).stream(model: model, messages: wire, reasoningEffort: reasoningEffort,
+        let stream = ChatClient(config: config, session: session).stream(model: model, messages: wire, reasoningEffort: reasoningEffort,
                                                        images: images)
         let task = Task { [weak self] in
             var failure: String?
