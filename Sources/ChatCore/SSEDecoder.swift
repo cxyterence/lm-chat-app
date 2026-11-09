@@ -3,6 +3,7 @@ import Foundation
 public enum StreamEvent: Equatable, Sendable {
     case content(String)
     case reasoning(String)
+    case toolCall(ToolCallDelta)
     case done(finishReason: String?)
 }
 
@@ -48,6 +49,10 @@ struct SSEDecoder {
                 }
                 if let text = delta.content, !text.isEmpty {
                     events.append(.content(text))
+                }
+                for call in delta.toolCalls ?? [] {
+                    events.append(.toolCall(ToolCallDelta(index: call.index, id: call.id, name: call.function?.name,
+                                                          arguments: call.function?.arguments ?? "")))
                 }
             }
             if let reason = choice.finishReason {

@@ -477,7 +477,7 @@ public final class ChatStore {
         switch event {
         case .content(let text): reply.content += text
         case .reasoning(let text): reply.reasoning += text
-        case .done: break
+        case .toolCall, .done: break
         }
     }
 

@@ -11,7 +11,7 @@ struct ThinkTagSplitterTests {
             switch event {
             case .content(let t): content += t
             case .reasoning(let t): reasoning += t
-            case .done: break
+            case .toolCall, .done: break
             }
         }
         return (content, reasoning)

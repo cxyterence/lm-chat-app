@@ -102,3 +102,5 @@ func makeImageStore() -> (store: ImageStore, cleanup: @Sendable () -> Void) {
 }
 
 func fileSize(_ url: URL) -> Int { (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0 }
+
+func isJSONNull(_ value: Any?) -> Bool { value is NSNull }

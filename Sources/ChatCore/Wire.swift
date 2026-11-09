@@ -2,11 +2,49 @@ import Foundation
 
 /// `content` is a plain string, or a list of image and text parts when the message carries images.
 struct WireMessage: Encodable {
-    let role: Role
+    let role: String
     let content: String
     var images: [Data] = []
+    var toolCalls: [ToolCall] = []
+    var toolCallID: String?
 
-    private enum CodingKeys: String, CodingKey { case role, content }
+    init(role: Role, content: String, images: [Data] = []) {
+        self.role = role.rawValue
+        self.content = content
+        self.images = images
+    }
+
+    private init(role: String, content: String, toolCalls: [ToolCall] = [], toolCallID: String? = nil) {
+        self.role = role
+        self.content = content
+        self.toolCalls = toolCalls
+        self.toolCallID = toolCallID
+    }
+
+    /// An assistant turn that called tools becomes that turn followed by one `tool` message per result.
+    /// A call that never finished still gets a result, since the wire requires one per call.
+    static func expanding(_ message: ChatMessage, images: [Data]) -> [WireMessage] {
+        guard message.role == .assistant, !message.toolCalls.isEmpty else {
+            return [WireMessage(role: message.role, content: message.search?.prompt ?? message.content, images: images)]
+        }
+        return [WireMessage(role: "assistant", content: message.content, toolCalls: message.toolCalls)]
+            + message.toolCalls.map {
+                WireMessage(role: "tool", content: $0.result?.text ?? "The tool call was cancelled.", toolCallID: $0.id)
+            }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case role, content
+        case toolCalls = "tool_calls"
+        case toolCallID = "tool_call_id"
+    }
+
+    private struct Call: Encodable {
+        struct Function: Encodable { let name, arguments: String }
+        let id: String
+        let type = "function"
+        let function: Function
+    }
 
     private struct Part: Encodable {
         struct ImageURL: Encodable { let url: String }
@@ -23,6 +61,12 @@ struct WireMessage: Encodable {
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(role, forKey: .role)
+        try container.encodeIfPresent(toolCallID, forKey: .toolCallID)
+        if !toolCalls.isEmpty {
+            try container.encode(toolCalls.map { Call(id: $0.id, function: .init(name: $0.name, arguments: $0.arguments)) },
+                                 forKey: .toolCalls)
+            return content.isEmpty ? try container.encodeNil(forKey: .content) : try container.encode(content, forKey: .content)
+        }
         guard !images.isEmpty else { return try container.encode(content, forKey: .content) }
         var parts = images.map {
             Part(type: "image_url", imageURL: .init(url: "data:image/jpeg;base64," + $0.base64EncodedString()))
@@ -33,13 +77,24 @@ struct WireMessage: Encodable {
 }
 
 struct WireChatRequest: Encodable {
+    struct Tool: Encodable {
+        struct Function: Encodable {
+            let name, description: String
+            let parameters: JSONValue
+        }
+        let type = "function"
+        let function: Function
+    }
+
     let model: String
     let messages: [WireMessage]
     let stream: Bool
     let reasoningEffort: ReasoningEffort?
+    /// nil rather than empty, since some servers reject an empty list.
+    let tools: [Tool]?
 
     enum CodingKeys: String, CodingKey {
-        case model, messages, stream
+        case model, messages, stream, tools
         case reasoningEffort = "reasoning_effort"
     }
 }
@@ -62,14 +117,23 @@ struct WireProbeRequest: Encodable {
 struct WireChunk: Decodable {
     struct Choice: Decodable {
         struct Delta: Decodable {
+            struct Call: Decodable {
+                struct Function: Decodable { let name, arguments: String? }
+                let index: Int?
+                let id: String?
+                let function: Function?
+            }
+
             let content: String?
             let reasoningContent: String?
             let reasoning: String?
+            let toolCalls: [Call]?
 
             enum CodingKeys: String, CodingKey {
                 case content
                 case reasoningContent = "reasoning_content"
                 case reasoning
+                case toolCalls = "tool_calls"
             }
         }
 

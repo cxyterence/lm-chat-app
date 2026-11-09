@@ -30,7 +30,8 @@ public struct ChatClient: Sendable {
         model: String,
         messages: [ChatMessage],
         reasoningEffort: ReasoningEffort? = nil,
-        images: ImageStore? = nil
+        images: ImageStore? = nil,
+        tools: [ToolSpec] = []
     ) -> AsyncThrowingStream<StreamEvent, Error> {
         let client = self
 
@@ -39,7 +40,7 @@ public struct ChatClient: Sendable {
                 do {
                     // Built here, off the caller's thread, because it reads and encodes every photo in the chat.
                     let request = try client.chatRequest(model: model, messages: messages,
-                                                         reasoningEffort: reasoningEffort, images: images)
+                                                         reasoningEffort: reasoningEffort, images: images, tools: tools)
                     let (bytes, response) = try await client.session.bytes(for: request)
                     guard let http = response as? HTTPURLResponse else { throw ChatClientError.invalidResponse }
                     guard (200..<300).contains(http.statusCode) else {
@@ -60,7 +61,7 @@ public struct ChatClient: Sendable {
                             switch event {
                             case .content(let text):
                                 splitter.push(text).forEach { continuation.yield($0) }
-                            case .reasoning:
+                            case .reasoning, .toolCall:
                                 continuation.yield(event)
                             case .done:
                                 splitter.flush().forEach { continuation.yield($0) }
@@ -85,7 +86,7 @@ public struct ChatClient: Sendable {
 
     /// A photo missing from `images` is left out rather than failing the whole request.
     func chatRequest(model: String, messages: [ChatMessage], reasoningEffort: ReasoningEffort? = nil,
-                     images: ImageStore? = nil) throws -> URLRequest {
+                     images: ImageStore? = nil, tools: [ToolSpec] = []) throws -> URLRequest {
         var request = URLRequest(url: config.baseURL.appendingPathComponent("chat/completions"))
         request.httpMethod = "POST"
         // Local models can spend minutes on prompt processing before the first token.
@@ -96,12 +97,14 @@ public struct ChatClient: Sendable {
         request.httpBody = try JSONEncoder().encode(
             WireChatRequest(
                 model: model,
-                messages: messages.map {
-                    WireMessage(role: $0.role, content: $0.search?.prompt ?? $0.content,
-                                images: $0.images.compactMap { id in images?.data(for: id) })
+                messages: messages.flatMap {
+                    WireMessage.expanding($0, images: $0.images.compactMap { id in images?.data(for: id) })
                 },
                 stream: true,
-                reasoningEffort: reasoningEffort
+                reasoningEffort: reasoningEffort,
+                tools: tools.isEmpty ? nil : tools.map {
+                    .init(function: .init(name: $0.name, description: $0.description, parameters: $0.parameters))
+                }
             )
         )
         return request

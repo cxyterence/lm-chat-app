@@ -100,6 +100,8 @@ func run(_ options: Options) async throws {
             write(text, to: .standardOutput)
         case .done:
             write("\n", to: .standardOutput)
+        case .toolCall:
+            break
         }
     }
 }

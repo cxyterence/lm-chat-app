@@ -16,6 +16,8 @@ public struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
     public var images: [ImageID]
     /// Set on a user message sent with `/web-search`.
     public var search: WebSearch?
+    /// Tools an assistant message called, with their results.
+    public var toolCalls: [ToolCall]
     public var createdAt: Date
 
     public init(
@@ -25,6 +27,7 @@ public struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
         reasoning: String = "",
         images: [ImageID] = [],
         search: WebSearch? = nil,
+        toolCalls: [ToolCall] = [],
         createdAt: Date = Date()
     ) {
         self.id = id
@@ -33,6 +36,7 @@ public struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
         self.reasoning = reasoning
         self.images = images
         self.search = search
+        self.toolCalls = toolCalls
         self.createdAt = createdAt
     }
 
@@ -44,6 +48,7 @@ public struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
         reasoning = try c.decode(String.self, forKey: .reasoning)
         images = try c.decodeIfPresent([ImageID].self, forKey: .images) ?? []
         search = try c.decodeIfPresent(WebSearch.self, forKey: .search)
+        toolCalls = try c.decodeIfPresent([ToolCall].self, forKey: .toolCalls) ?? []
         createdAt = try c.decode(Date.self, forKey: .createdAt)
     }
 }
