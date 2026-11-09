@@ -15,6 +15,7 @@ Set MOCK_API_KEY to require `Authorization: Bearer <key>`. Set MOCK_EXTRA_MODELS
 """
 import argparse
 import base64
+from itertools import takewhile
 import re
 import json
 import os
@@ -28,6 +29,16 @@ MODELS += [f"mock-extra-{i:03}" for i in range(int(os.environ.get("MOCK_EXTRA_MO
 # Like vLLM with the user's template. Other models ignore reasoning_effort, as llama.cpp does.
 EFFORTS = {"mock-reasoning": {"none", "low", "medium", "xhigh"}}
 TEXT_ONLY = {"mock-think"}
+
+
+MCP_TOOLS = [
+    {"name": "get_me", "description": "Who the token belongs to", "result": "You are mock-user (Mock User).",
+     "inputSchema": {"type": "object", "properties": {}}, "annotations": {"readOnlyHint": True}},
+    {"name": "list_repos", "description": "Repositories you can read", "result": "mock-user/app, mock-user/site",
+     "inputSchema": {"type": "object", "properties": {}}, "annotations": {"readOnlyHint": True}},
+    {"name": "create_issue", "description": "Open an issue", "result": "Created issue #7.",
+     "inputSchema": {"type": "object", "properties": {"title": {"type": "string"}}}, "annotations": {"readOnlyHint": False}},
+]
 
 
 def chunk(delta, finish=None):
@@ -131,9 +142,57 @@ class Handler(BaseHTTPRequestHandler):
                          "snippet": f"Snippet {i} about {q}.", "position": i} for i in range(1, 4)],
         })
 
+    def mcp(self):
+        if self.headers.get("Authorization") != "Bearer mock-token":
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Bearer error="invalid_token"')
+            self.end_headers()
+            return
+        msg = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+        if "id" not in msg:
+            self.send_response(202)
+            self.end_headers()
+            return
+        method, params = msg.get("method"), msg.get("params", {})
+        tools = [t for t in MCP_TOOLS if t["annotations"]["readOnlyHint"] or not self.path.endswith("/readonly")]
+        headers = {}
+        if method == "initialize":
+            headers["Mcp-Session-Id"] = "mock-session"
+            result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
+                      "serverInfo": {"name": "mock-mcp", "version": "1"}}
+        elif self.headers.get("Mcp-Session-Id") != "mock-session":
+            return self.send_json(404, {"error": "unknown session"})
+        elif method == "tools/list":
+            result = {"tools": [{k: t[k] for k in ("name", "description", "inputSchema", "annotations")} for t in tools]}
+        elif method == "tools/call":
+            tool = next((t for t in tools if t["name"] == params.get("name")), None)
+            result = {"content": [{"type": "text", "text": tool["result"] if tool else "no such tool"}],
+                      "isError": tool is None}
+            time.sleep(0.8)
+        else:
+            result = None
+        reply = {"jsonrpc": "2.0", "id": msg["id"], "result": result} if result is not None else \
+                {"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32601, "message": f"no method {method}"}}
+        data = json.dumps(reply)
+        if method == "tools/call":
+            body = f"event: message\ndata: {data}\n\n".encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+        else:
+            body = data.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+        for k, v in headers.items():
+            self.send_header(k, v)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self):
         if self.path.rstrip("/") == "/search":
             return self.search()
+        if self.path.startswith("/mcp"):
+            return self.mcp()
         if not self.authorized():
             return
         if self.path.rstrip("/") != "/v1/chat/completions":
@@ -153,6 +212,19 @@ class Handler(BaseHTTPRequestHandler):
         if images and model in TEXT_ONLY:
             return self.send_json(400, {"error": {"message": f"{model} does not support image input."}})
         reply = f"You said: {last_user}"
+        messages = body.get("messages", [])
+        offered = [t["function"]["name"] for t in body.get("tools", [])]
+        if messages and messages[-1]["role"] == "tool":
+            results = list(takewhile(lambda m: m["role"] == "tool", reversed(messages)))[::-1]
+            reply = "Tool said: " + " / ".join(m["content"] for m in results)
+        elif (wanted := next((t for t in offered if f"use {t}" in last_user), None)):
+            call = {"index": 0, "id": f"call_{int(time.time() * 1000)}", "type": "function",
+                    "function": {"name": wanted, "arguments": ""}}
+            pieces = ['{"title":', ' "From the', ' app"}']
+            events = [chunk({"tool_calls": [call]})] + \
+                     [chunk({"tool_calls": [{"index": 0, "function": {"arguments": p}}]}) for p in pieces] + \
+                     [chunk({}, finish="tool_calls")]
+            return self.stream(events, [0.05] * len(events), finish=None)
         if last_user.startswith("Answer using these web search results"):
             sources = re.findall(r"^\[(\d+)\] .*\n(\S+)$", last_user, re.M)
             question = last_user.rsplit("Question: ", 1)[-1]
@@ -191,12 +263,17 @@ class Handler(BaseHTTPRequestHandler):
                 {"index": 0, "message": {"role": "assistant", "content": content},
                  "finish_reason": "stop"}]})
 
+        self.stream(events, delays)
+
+    def stream(self, events, delays, finish="stop"):
+        if finish:
+            events, delays = events + [chunk({}, finish)], delays + [0]
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self.wfile.write(b": mock stream\n\n")
-        for e, delay in zip(events + [chunk({}, "stop")], delays + [0]):
+        for e, delay in zip(events, delays):
             self.wfile.write(f"data: {json.dumps(e)}\n\n".encode())
             self.wfile.flush()
             time.sleep(delay)

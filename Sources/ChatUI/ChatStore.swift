@@ -11,6 +11,7 @@ final class LiveReply {
     var reasoning = ""
     /// What the reply is waiting on before any text arrives, like a web search.
     var status: String?
+    var toolCalls: [ToolCall] = []
 
     init(messageID: UUID) { self.messageID = messageID }
 }
@@ -55,7 +56,11 @@ public final class ChatStore {
         static let theme = "theme"
         /// Points `/web-search` somewhere other than serper.dev, for testing against a local mock.
         static let serperURL = "serperURL"
+        static let mcpServers = "mcpServers"
     }
+
+    /// Rounds of tool use one reply may take before it must answer with what it has.
+    static let maxToolRounds = 10
 
     /// Settings from before connections existed, read once to build the first connection.
     private enum LegacyKeys {
@@ -78,6 +83,10 @@ public final class ChatStore {
     private(set) var generation: Generation = .idle
     private(set) var liveReply: LiveReply?
     private(set) var persistenceError: String?
+    private(set) var mcpServers: [MCPServer] = []
+    private(set) var mcpStatus: [UUID: MCPStatus] = [:]
+    /// The tool call waiting for the user to allow or decline it.
+    private(set) var awaitingApproval: String?
 
     @ObservationIgnored let defaults: UserDefaults
     @ObservationIgnored private let secrets: Secrets
@@ -85,6 +94,11 @@ public final class ChatStore {
     @ObservationIgnored private let fileURL: URL
     @ObservationIgnored let images: ImageStore
     @ObservationIgnored private let session: URLSession
+    @ObservationIgnored private var mcpClients: [UUID: MCPClient] = [:]
+    @ObservationIgnored private var mcpTokens: [UUID: String] = [:]
+    @ObservationIgnored private var approvalContinuation: CheckedContinuation<Bool, Never>?
+    /// Models whose server refused a request carrying tools. They're asked without tools from then on.
+    @ObservationIgnored private var toolless: Set<String> = []
 
     public convenience init() {
         self.init(defaults: .standard, fileURL: ChatStore.defaultFileURL, secrets: .keychain)
@@ -100,6 +114,11 @@ public final class ChatStore {
         theme = defaults.string(forKey: Keys.theme).flatMap(Theme.init(rawValue:)) ?? .system
         loadConnections()
         for service in APIService.allCases { serviceKeys[service] = secrets.get(service.secretAccount) }
+        if let data = defaults.data(forKey: Keys.mcpServers),
+           let saved = try? JSONDecoder().decode([MCPServer].self, from: data) {
+            mcpServers = saved
+            for server in saved { mcpTokens[server.id] = secrets.get(server.secretAccount) }
+        }
         do {
             conversations = try ConversationStore.load(from: fileURL, images: images)
                 .sorted { $0.updatedAt > $1.updatedAt }
@@ -214,6 +233,108 @@ public final class ChatStore {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         serviceKeys[service] = trimmed.isEmpty ? nil : trimmed
         secrets.set(service.secretAccount, trimmed)
+    }
+
+    // MARK: MCP servers
+
+    func mcpToken(for id: UUID) -> String { mcpTokens[id] ?? "" }
+
+    /// Adds or replaces a server. Its tools are fetched again, since the address or token may have changed.
+    func saveMCPServer(_ server: MCPServer, token: String) {
+        if let index = mcpServers.firstIndex(where: { $0.id == server.id }) {
+            mcpServers[index] = server
+        } else {
+            mcpServers.append(server)
+        }
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        mcpTokens[server.id] = trimmed.isEmpty ? nil : trimmed
+        secrets.set(server.secretAccount, trimmed)
+        mcpClients[server.id] = nil
+        mcpStatus[server.id] = nil
+        persistMCPServers()
+        if server.enabled { refreshMCPServer(server.id) }
+    }
+
+    func deleteMCPServer(_ id: UUID) {
+        guard let server = mcpServers.first(where: { $0.id == id }) else { return }
+        mcpServers.removeAll { $0.id == id }
+        secrets.set(server.secretAccount, "")
+        mcpTokens[id] = nil
+        mcpClients[id] = nil
+        mcpStatus[id] = nil
+        persistMCPServers()
+    }
+
+    func setMCPServer(_ id: UUID, enabled: Bool) {
+        guard let index = mcpServers.firstIndex(where: { $0.id == id }) else { return }
+        mcpServers[index].enabled = enabled
+        persistMCPServers()
+        if enabled, mcpStatus[id] == nil { refreshMCPServer(id) }
+    }
+
+    func refreshMCPServer(_ id: UUID) {
+        guard let server = mcpServers.first(where: { $0.id == id }) else { return }
+        Task { await connect(server) }
+    }
+
+    @discardableResult
+    private func connect(_ server: MCPServer) async -> [MCPTool]? {
+        mcpStatus[server.id] = .connecting
+        do {
+            let tools = try await mcpClient(for: server).listTools()
+            if mcpServers.contains(server) { mcpStatus[server.id] = .ready(tools) }
+            return tools
+        } catch {
+            if mcpServers.contains(server) { mcpStatus[server.id] = .failed(error.localizedDescription) }
+            return nil
+        }
+    }
+
+    private func mcpClient(for server: MCPServer) -> MCPClient {
+        if let client = mcpClients[server.id] { return client }
+        let client = MCPClient(url: server.url, token: mcpTokens[server.id], session: session)
+        mcpClients[server.id] = client
+        return client
+    }
+
+    private func persistMCPServers() {
+        defaults.set(try? JSONEncoder().encode(mcpServers), forKey: Keys.mcpServers)
+    }
+
+    /// Every enabled server's tools, connecting to any not yet listed. A server that can't be reached is
+    /// left out so the reply still happens; Settings shows why.
+    private func offeredTools() async -> [OfferedTool] {
+        var found: [(MCPServer, MCPClient, [MCPTool])] = []
+        for server in mcpServers where server.enabled {
+            if case .ready(let tools) = mcpStatus[server.id] {
+                found.append((server, mcpClient(for: server), tools))
+                continue
+            }
+            liveReply?.status = "Connecting to \(server.name)…"
+            if let tools = await connect(server) { found.append((server, mcpClient(for: server), tools)) }
+        }
+        liveReply?.status = nil
+        return OfferedTool.offer(found)
+    }
+
+    func resolveApproval(_ allowed: Bool) {
+        guard let continuation = approvalContinuation else { return }
+        approvalContinuation = nil
+        awaitingApproval = nil
+        continuation.resume(returning: allowed)
+    }
+
+    /// Waits for Allow or Decline on a tool that may change things. Stopping the reply declines.
+    private func approve(_ callID: String) async -> Bool {
+        if Task.isCancelled { return false }
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                approvalContinuation = continuation
+                awaitingApproval = callID
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in self?.resolveApproval(false) }
+        }
     }
 
     /// What a request sends. Until the levels are known it's the saved choice, which the server accepted before.
@@ -438,66 +559,137 @@ public final class ChatStore {
     }
 
     private func startStreaming(conversationID id: UUID, request: Request = .reply) {
-        guard let config, let index = conversations.firstIndex(where: { $0.id == id }) else { return }
-
-        let output = ChatMessage(role: request == .reply ? .assistant : .summary, content: "")
-        conversations[index].messages.append(output)
-        conversations[index].updatedAt = Date()
-        liveReply = LiveReply(messageID: output.id)
-
+        guard let config, conversations.contains(where: { $0.id == id }) else { return }
+        let first = beginOutput(in: id, role: request == .reply ? .assistant : .summary)
         let client = ChatClient(config: config, session: session)
+        let task = Task { await generate(conversationID: id, request: request, first: first, client: client) }
+        generation = .streaming(conversationID: id, task: task)
+    }
+
+    /// Streams the reply. When the model calls tools, runs them and asks again with their results, each
+    /// round its own assistant message, until it answers or uses up its rounds.
+    private func generate(conversationID id: UUID, request: Request, first: UUID, client: ChatClient) async {
         let (model, effort, systemPrompt, images) = (model, reasoningEffort, systemPrompt, images)
-        let task = Task { [weak self] in
-            var outcome = Outcome.completed
-            do {
-                try await self?.searchIfNeeded(conversationID: id)
-                let history = self?.conversations.first { $0.id == id }?.messages.filter { $0.id != output.id } ?? []
+        var current = first
+        var outcome = Outcome.completed
+        do {
+            try await searchIfNeeded(conversationID: id)
+            let tools = request == .reply ? await offeredTools() : []
+            for round in 0... {
+                let history = conversations.first { $0.id == id }?.messages.filter { $0.id != current } ?? []
                 let wire = switch request {
                 case .reply: Compaction.context(of: history, systemPrompt: systemPrompt)
                 case .compact(let focus): Compaction.request(for: history, focus: focus)
                 }
-                let stream = client.stream(model: model, messages: wire, reasoningEffort: effort, images: images)
-                for try await event in stream {
-                    self?.apply(event, to: output.id, in: id)
-                    if case .done("length") = event, request != .reply {
-                        outcome = .failed("The summary was cut off by the model's output limit.")
-                    }
-                }
-                if Task.isCancelled { outcome = .cancelled }
-            } catch {
-                outcome = Task.isCancelled ? .cancelled : .failed(error.localizedDescription)
+                let offer = round < Self.maxToolRounds && !toolless.contains(model) ? tools : []
+                let calls = try await streamRound(client, model: model, effort: effort, images: images, wire: wire,
+                                                  tools: offer, into: current, request: request)
+                guard !calls.isEmpty, !offer.isEmpty, !Task.isCancelled else { break }
+                await runTools(offer, for: current)
+                guard !Task.isCancelled else { break }
+                commitLiveReply(to: current, in: id)
+                current = beginOutput(in: id, role: .assistant)
             }
-            self?.finish(conversationID: id, messageID: output.id, request: request, outcome: outcome)
+            if Task.isCancelled { outcome = .cancelled }
+        } catch {
+            outcome = Task.isCancelled ? .cancelled : .failed(error.localizedDescription)
         }
-        generation = .streaming(conversationID: id, task: task)
+        finish(conversationID: id, messageID: current, request: request, outcome: outcome)
     }
 
-    private func apply(_ event: StreamEvent, to messageID: UUID, in conversationID: UUID) {
-        guard let reply = liveReply, reply.messageID == messageID else { return }
-        switch event {
-        case .content(let text): reply.content += text
-        case .reasoning(let text): reply.reasoning += text
-        case .toolCall, .done: break
+    private func beginOutput(in id: UUID, role: Role) -> UUID {
+        let output = ChatMessage(role: role, content: "")
+        if let index = conversations.firstIndex(where: { $0.id == id }) {
+            conversations[index].messages.append(output)
+            conversations[index].updatedAt = Date()
         }
+        liveReply = LiveReply(messageID: output.id)
+        return output.id
+    }
+
+    /// One request to the model. Returns the tools it called, also shown live as they arrive.
+    private func streamRound(_ client: ChatClient, model: String, effort: ReasoningEffort?, images: ImageStore,
+                             wire: [ChatMessage], tools: [OfferedTool], into messageID: UUID,
+                             request: Request) async throws -> [ToolCall] {
+        var calls = ToolCallAccumulator()
+        let servers = Dictionary(tools.map { ($0.name, $0.server.name) }, uniquingKeysWith: { first, _ in first })
+        do {
+            for try await event in client.stream(model: model, messages: wire, reasoningEffort: effort, images: images,
+                                                 tools: tools.map(\.spec)) {
+                guard let reply = liveReply, reply.messageID == messageID else { continue }
+                switch event {
+                case .content(let text): reply.content += text
+                case .reasoning(let text): reply.reasoning += text
+                case .toolCall(let delta):
+                    calls.add(delta)
+                    reply.toolCalls = calls.calls.map { call in
+                        var call = call
+                        call.server = servers[call.name] ?? ""
+                        return call
+                    }
+                case .done("length") where request != .reply:
+                    throw SummaryCutOff()
+                case .done: break
+                }
+            }
+        } catch ChatClientError.http(400, _) where !tools.isEmpty && liveReply?.content.isEmpty != false {
+            // Servers without tool support reject the whole request. Ask again without tools.
+            toolless.insert(model)
+            return try await streamRound(client, model: model, effort: effort, images: images, wire: wire,
+                                         tools: [], into: messageID, request: request)
+        }
+        return liveReply?.toolCalls ?? []
+    }
+
+    /// Runs each call in turn, asking first for any tool that isn't read-only. Results show as they land.
+    private func runTools(_ offered: [OfferedTool], for messageID: UUID) async {
+        guard let reply = liveReply, reply.messageID == messageID else { return }
+        for index in reply.toolCalls.indices {
+            let call = reply.toolCalls[index]
+            let result: ToolCall.Result
+            if let tool = offered.first(where: { $0.name == call.name }) {
+                if !tool.tool.readOnly, !(await approve(call.id)) {
+                    guard !Task.isCancelled else { return }
+                    result = .init(text: "The user declined to run this tool.", isError: true)
+                } else {
+                    do {
+                        result = try await tool.client.callTool(tool.tool.name, arguments: call.arguments)
+                    } catch {
+                        result = .init(text: "The tool failed: \(error.localizedDescription)", isError: true)
+                    }
+                }
+            } else {
+                result = .init(text: "There is no tool named \(call.name).", isError: true)
+            }
+            guard !Task.isCancelled else { return }
+            reply.toolCalls[index].result = result
+        }
+    }
+
+    private func commitLiveReply(to messageID: UUID, in id: UUID) {
+        guard let reply = liveReply, reply.messageID == messageID,
+              let c = conversations.firstIndex(where: { $0.id == id }),
+              let m = conversations[c].messages.firstIndex(where: { $0.id == messageID })
+        else { return }
+        conversations[c].messages[m].content = reply.content
+        conversations[c].messages[m].reasoning = reply.reasoning
+        conversations[c].messages[m].toolCalls = reply.toolCalls
     }
 
     /// A reply keeps whatever arrived. A summary is all or nothing, since a partial one would silently drop
     /// the rest of the history from what the model sees.
     private func finish(conversationID id: UUID, messageID: UUID, request: Request, outcome: Outcome) {
         var outcome = outcome
+        commitLiveReply(to: messageID, in: id)
         if let c = conversations.firstIndex(where: { $0.id == id }),
            let m = conversations[c].messages.firstIndex(where: { $0.id == messageID }) {
-            if let reply = liveReply, reply.messageID == messageID {
-                conversations[c].messages[m].content = reply.content
-                conversations[c].messages[m].reasoning = reply.reasoning
-            }
             let message = conversations[c].messages[m]
             if message.role == .summary, outcome == .completed, message.content.isEmpty {
                 outcome = .failed("The model returned an empty summary.")
             }
             let keep = message.role == .summary
                 ? outcome == .completed
-                : !(message.content.isEmpty && message.reasoning.isEmpty)
+                : !(message.content.isEmpty && message.reasoning.isEmpty && message.toolCalls.isEmpty)
             if !keep { conversations[c].messages.remove(at: m) }
             conversations[c].updatedAt = Date()
         }
@@ -518,4 +710,8 @@ public final class ChatStore {
             persistenceError = "Couldn't save chats: \(error.localizedDescription)"
         }
     }
+}
+
+private struct SummaryCutOff: LocalizedError {
+    var errorDescription: String? { "The summary was cut off by the model's output limit." }
 }

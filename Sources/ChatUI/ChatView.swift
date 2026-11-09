@@ -45,7 +45,8 @@ struct ChatView: View {
                     ForEach(Array(live.messages.enumerated()), id: \.element.id) { index, message in
                         let isLive = streaming && message.id == live.messages.last?.id
                         MessageRow(message: message, images: store.images, isStreaming: isLive, reply: isLive ? store.liveReply : nil,
-                                   edit: store.canSend ? { beginEditing(message) } : nil)
+                                   edit: store.canSend ? { beginEditing(message) } : nil,
+                                   approval: isLive ? store.awaitingApproval : nil, resolve: store.resolveApproval)
                             .opacity(erased.map { index > $0 } == true ? 0.35 : 1)
                             .transition(.opacity.combined(with: .offset(y: 12)))
                     }
@@ -135,6 +136,9 @@ private struct MessageRow: View {
     let reply: LiveReply?
     /// nil while a reply is streaming, when the message can't be changed.
     let edit: (() -> Void)?
+    /// The tool call in this message waiting to be allowed.
+    let approval: String?
+    let resolve: (Bool) -> Void
     @Environment(\.palette) private var palette
 
     var body: some View {
@@ -169,7 +173,7 @@ private struct MessageRow: View {
             }
         case .assistant:
             HStack {
-                AssistantBubble(message: message, isStreaming: isStreaming, reply: reply)
+                AssistantBubble(message: message, isStreaming: isStreaming, reply: reply, approval: approval, resolve: resolve)
                 Spacer(minLength: 48)
             }
         case .summary:
@@ -184,10 +188,13 @@ private struct AssistantBubble: View {
     let message: ChatMessage
     let isStreaming: Bool
     let reply: LiveReply?
+    let approval: String?
+    let resolve: (Bool) -> Void
     @State private var thinkingOverride: Bool?
 
     private var content: String { reply?.content ?? message.content }
     private var reasoning: String { reply?.reasoning ?? message.reasoning }
+    private var toolCalls: [ToolCall] { reply?.toolCalls ?? message.toolCalls }
     @Environment(\.palette) private var palette
 
     private var thinkingExpanded: Binding<Bool> {
@@ -221,7 +228,15 @@ private struct AssistantBubble: View {
                         .foregroundStyle(palette.text)
                         .textSelection(.enabled)
                 }
-            } else if isStreaming && reasoning.isEmpty {
+            }
+            if !toolCalls.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(toolCalls) { call in
+                        ToolCallRow(call: call, running: isStreaming, awaiting: call.id == approval, resolve: resolve)
+                    }
+                }
+            }
+            if content.isEmpty && isStreaming && reasoning.isEmpty && toolCalls.isEmpty {
                 if let status = reply?.status {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
@@ -236,6 +251,87 @@ private struct AssistantBubble: View {
         }
         .contextMenu {
             Button("Copy", systemImage: "doc.on.doc") { copyToPasteboard(content) }
+        }
+    }
+}
+
+/// One tool the model called: what it ran, how it went, and on tap the arguments and result.
+private struct ToolCallRow: View {
+    let call: ToolCall
+    let running: Bool
+    let awaiting: Bool
+    let resolve: (Bool) -> Void
+    @State private var expanded = false
+    @Environment(\.palette) private var palette
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                withAnimation(.snappy(duration: 0.2)) { expanded.toggle() }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "wrench.and.screwdriver").foregroundStyle(palette.secondaryText)
+                    (Text(call.server.isEmpty ? "" : call.server + " · ").foregroundStyle(palette.secondaryText)
+                        + Text(call.name).foregroundStyle(palette.text))
+                        .font(.callout.monospaced())
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    state
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Tool \(call.name)")
+            .accessibilityValue(stateLabel)
+
+            if awaiting {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("This tool can make changes. Run it?").font(.caption).foregroundStyle(palette.secondaryText)
+                    HStack(spacing: 8) {
+                        Button("Allow") { resolve(true) }
+                            .buttonStyle(.borderedProminent).tint(palette.accent)
+                        Button("Decline") { resolve(false) }
+                            .buttonStyle(.bordered).tint(palette.secondaryText)
+                    }
+                    .font(.callout.weight(.semibold))
+                }
+                .transition(.opacity)
+            }
+            if expanded {
+                detail("Arguments", call.arguments)
+                if let result = call.result { detail(result.isError ? "Error" : "Result", result.text) }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(palette.fill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    @ViewBuilder private var state: some View {
+        if let result = call.result {
+            Image(systemName: result.isError ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
+                .foregroundStyle(result.isError ? palette.danger : palette.success)
+        } else if awaiting {
+            Image(systemName: "hand.raised.fill").foregroundStyle(palette.accent)
+        } else if running {
+            ProgressView().controlSize(.small)
+        } else {
+            Text("Cancelled").font(.caption).foregroundStyle(palette.secondaryText)
+        }
+    }
+
+    private var stateLabel: String {
+        if let result = call.result { return result.isError ? "Failed" : "Done" }
+        return awaiting ? "Waiting for approval" : running ? "Running" : "Cancelled"
+    }
+
+    private func detail(_ title: String, _ text: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.caption.weight(.semibold)).foregroundStyle(palette.secondaryText)
+            Text(text.count > 2000 ? text.prefix(2000) + "…" : text)
+                .font(.caption.monospaced())
+                .foregroundStyle(palette.text)
+                .textSelection(.enabled)
         }
     }
 }

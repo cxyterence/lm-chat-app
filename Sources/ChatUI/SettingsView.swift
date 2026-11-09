@@ -2,12 +2,13 @@ import ChatCore
 import SwiftUI
 
 enum SettingsPage: String, CaseIterable, Identifiable {
-    case connections, apiKeys, appearance
+    case connections, apiKeys, mcp, appearance
 
     var id: Self { self }
     var title: String {
         switch self {
         case .apiKeys: "API Keys"
+        case .mcp: "MCP Connections"
         default: rawValue.capitalized
         }
     }
@@ -15,9 +16,17 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         switch self {
         case .connections: "network"
         case .apiKeys: "key"
+        case .mcp: "point.3.connected.trianglepath.dotted"
         case .appearance: "paintpalette"
         }
     }
+}
+
+/// Which MCP server the editor opens: GitHub's preset, a blank one, or a saved one.
+enum MCPRoute: Hashable {
+    case github
+    case new
+    case edit(UUID)
 }
 
 /// Which connection the editor opens: a blank one, or a saved one by ID.
@@ -61,11 +70,16 @@ struct SettingsView: View {
                     switch page {
                     case .connections: ConnectionsSettings(store: store) { path.append($0) }
                     case .apiKeys: APIKeysSettings(store: store)
+                    case .mcp: MCPSettings(store: store) { path.append($0) }
                     case .appearance: AppearanceSettings(store: store)
                     }
                 }
                 .background(palette.groupedBackground)
                 .modifier(SettingsChrome(title: page.title, done: { dismiss() }))
+            }
+            .navigationDestination(for: MCPRoute.self) { route in
+                MCPServerEditor(store: store, route: route)
+                    .background(palette.groupedBackground)
             }
             .navigationDestination(for: ConnectionRoute.self) { route in
                 ConnectionEditor(store: store, route: route)
@@ -80,6 +94,8 @@ struct SettingsView: View {
     private func summary(_ page: SettingsPage) -> String {
         switch page {
         case .connections: store.activeConnection?.name ?? "Not set"
+        case .mcp:
+            store.mcpServers.filter(\.enabled).map(\.name).joined(separator: ", ")
         case .apiKeys:
             APIService.allCases.filter { !store.serviceKey($0).isEmpty }.map(\.name).joined(separator: ", ")
         case .appearance: store.theme.name
@@ -334,5 +350,243 @@ private struct ServiceKeyRow: View {
         }
         .listRowBackground(palette.surface)
         .onAppear { key = store.serviceKey(service) }
+    }
+}
+
+struct MCPSettings: View {
+    let store: ChatStore
+    let open: (MCPRoute) -> Void
+    @Environment(\.palette) private var palette
+
+    var body: some View {
+        List {
+            if !store.mcpServers.isEmpty {
+                Section {
+                    ForEach(store.mcpServers) { server in
+                        row(server)
+                            .swipeActions {
+                                Button("Delete", role: .destructive) { store.deleteMCPServer(server.id) }
+                            }
+                    }
+                } footer: {
+                    Text("Tools from servers that are on are offered to the model in every chat. A tool that can make changes asks you before it runs.")
+                }
+                .listRowBackground(palette.surface)
+            }
+            Section {
+                if !store.mcpServers.contains(where: \.isGitHub) {
+                    Button { open(.github) } label: {
+                        Label("Add GitHub", systemImage: "plus").foregroundStyle(palette.accent)
+                    }
+                }
+                Button { open(.new) } label: {
+                    Label("Add Server", systemImage: "plus").foregroundStyle(palette.accent)
+                }
+            } footer: {
+                if store.mcpServers.isEmpty {
+                    Text("MCP servers give the model tools, like reading your GitHub repositories, issues and pull requests.")
+                }
+            }
+            .listRowBackground(palette.surface)
+        }
+        .foregroundStyle(palette.text)
+        .scrollContentBackground(.hidden)
+    }
+
+    private func row(_ server: MCPServer) -> some View {
+        HStack(spacing: 12) {
+            Button { open(.edit(server.id)) } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(server.name).foregroundStyle(palette.text)
+                    MCPStatusText(status: server.enabled ? store.mcpStatus[server.id] : nil, enabled: server.enabled)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .accessibilityLabel("Edit \(server.name)")
+            Toggle(server.name, isOn: Binding(get: { server.enabled }, set: { store.setMCPServer(server.id, enabled: $0) }))
+                .labelsHidden()
+                .tint(palette.accent)
+        }
+        .buttonStyle(.borderless)
+    }
+}
+
+private struct MCPStatusText: View {
+    let status: MCPStatus?
+    let enabled: Bool
+    @Environment(\.palette) private var palette
+
+    var body: some View {
+        Group {
+            switch status {
+            case nil: Text(enabled ? "Not connected yet" : "Off").foregroundStyle(palette.secondaryText)
+            case .connecting: Text("Connecting…").foregroundStyle(palette.secondaryText)
+            case .ready(let tools):
+                Text("Connected · \(tools.count) tool\(tools.count == 1 ? "" : "s")").foregroundStyle(palette.success)
+            case .failed(let message): Text(message).foregroundStyle(palette.danger).lineLimit(2)
+            }
+        }
+        .font(.caption)
+    }
+}
+
+struct MCPServerEditor: View {
+    private static let githubTokenURL = URL(string: "https://github.com/settings/personal-access-tokens/new")!
+
+    let store: ChatStore
+    let route: MCPRoute
+    @State private var name = ""
+    @State private var url = ""
+    @State private var token = ""
+    @State private var error: String?
+    @State private var confirmingDelete = false
+    @State private var loaded = false
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.palette) private var palette
+
+    private var existing: MCPServer? {
+        guard case .edit(let id) = route else { return nil }
+        return store.mcpServers.first { $0.id == id }
+    }
+
+    private var isGitHub: Bool { URL(string: url)?.host() == "api.githubcopilot.com" }
+
+    /// GitHub's server takes `/readonly` on the end to hide every tool that writes.
+    private var allowsChanges: Binding<Bool> {
+        Binding(get: { !url.hasSuffix("/readonly") }, set: { allow in
+            var base = url
+            while base.hasSuffix("/") { base.removeLast() }
+            if base.hasSuffix("/readonly") { base.removeLast("/readonly".count) }
+            url = allow ? base + "/" : base + "/readonly"
+        })
+    }
+
+    var body: some View {
+        Form {
+            Section("Name") {
+                TextField("Name", text: $name, prompt: Text("My server"))
+            }
+            .listRowBackground(palette.surface)
+
+            Section {
+                TextField("Server URL", text: $url)
+                    .autocorrectionDisabled()
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    .keyboardType(.URL)
+                    #endif
+                SecureField(isGitHub ? "Personal access token" : "Token (optional)", text: $token)
+                    .autocorrectionDisabled()
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    #endif
+                if isGitHub {
+                    Link("Create a GitHub token", destination: Self.githubTokenURL).foregroundStyle(palette.accent)
+                }
+                if let error {
+                    Text(error).foregroundStyle(palette.danger).font(.callout)
+                }
+            } header: {
+                Text("Server")
+            } footer: {
+                Text(isGitHub
+                     ? "A fine-grained token with read access to the repositories you want the model to see. Sent as a Bearer token and kept in the Keychain."
+                     : "The server's Streamable HTTP address. A token is sent as a Bearer token and kept in the Keychain.")
+            }
+            .listRowBackground(palette.surface)
+
+            if isGitHub {
+                Section {
+                    Toggle("Allow changes", isOn: allowsChanges).tint(palette.accent)
+                } footer: {
+                    Text(allowsChanges.wrappedValue
+                         ? "The model can also use tools that change things, like opening issues. Each one asks you first."
+                         : "The model can read repositories, issues and pull requests but has no tools that change them.")
+                }
+                .listRowBackground(palette.surface)
+            }
+
+            if let existing {
+                Section {
+                    switch store.mcpStatus[existing.id] {
+                    case .ready(let tools):
+                        ForEach(tools, id: \.name) { tool in
+                            Label {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(tool.name).font(.callout.monospaced())
+                                    if !tool.description.isEmpty {
+                                        Text(tool.description).font(.caption).foregroundStyle(palette.secondaryText).lineLimit(2)
+                                    }
+                                }
+                            } icon: {
+                                Image(systemName: tool.readOnly ? "eye" : "pencil")
+                                    .foregroundStyle(tool.readOnly ? palette.secondaryText : palette.accent)
+                            }
+                        }
+                    case .connecting:
+                        ProgressView()
+                    case .failed(let message):
+                        Text(message).foregroundStyle(palette.danger).font(.callout)
+                    case nil:
+                        Text(existing.enabled ? "Not connected yet" : "Turned off").foregroundStyle(palette.secondaryText)
+                    }
+                    Button("Refresh Tools") { store.refreshMCPServer(existing.id) }.foregroundStyle(palette.accent)
+                } header: {
+                    Text("Tools")
+                } footer: {
+                    Text("Tools marked with a pencil can make changes and ask before running.")
+                }
+                .listRowBackground(palette.surface)
+
+                Section {
+                    Button("Delete Server", role: .destructive) { confirmingDelete = true }
+                }
+                .listRowBackground(palette.surface)
+            }
+        }
+        .formStyle(.grouped)
+        .foregroundStyle(palette.text)
+        .scrollContentBackground(.hidden)
+        .navigationTitle(existing == nil ? "New Server" : "Edit Server")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Save", action: save).disabled(url.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .confirmationDialog("Delete this server?", isPresented: $confirmingDelete, titleVisibility: .visible) {
+            Button("Delete Server", role: .destructive) {
+                if let existing { store.deleteMCPServer(existing.id) }
+                dismiss()
+            }
+        }
+        .onAppear {
+            guard !loaded else { return }
+            loaded = true
+            let server = existing ?? (route == .github ? .github() : nil)
+            guard let server else { return }
+            name = server.name
+            url = server.url.absoluteString
+            if let existing { token = store.mcpToken(for: existing.id) }
+        }
+    }
+
+    private func save() {
+        let trimmed = url.trimmingCharacters(in: .whitespaces)
+        guard let parsed = URL(string: trimmed), let scheme = parsed.scheme, ["http", "https"].contains(scheme),
+              parsed.host() != nil
+        else {
+            error = "Enter the server's full address, starting with https://"
+            return
+        }
+        let trimmedName = name.trimmingCharacters(in: .whitespaces)
+        var server = existing ?? MCPServer(name: "", url: parsed)
+        server.name = trimmedName.isEmpty ? (parsed.host() ?? trimmed) : trimmedName
+        server.url = parsed
+        store.saveMCPServer(server, token: token)
+        dismiss()
     }
 }

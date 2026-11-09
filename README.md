@@ -39,6 +39,12 @@ Type `/` in the message field to see commands. `/compact` asks the model to summ
 
 `/web-search <query>` searches Google through [Serper](https://serper.dev) and has the model answer from the top results, citing them as numbered links. Add your Serper key in Settings › API Keys; it is kept in the Keychain. The results are saved with the question, so follow-up messages can still refer to them, and they are listed under it as sources. Editing the question searches again. To test against the mock server, launch with `-serperURL http://<mac>:8099`.
 
+Settings › MCP Connections adds MCP servers that give the model tools. Tools from every server that is switched on are offered to the model in each chat; when it calls one, the app runs it, shows the call under the reply (tap it for the arguments and result), and asks the model again with the result, for up to 10 rounds. A tool the server doesn't mark read-only waits for you to Allow or Decline it. Servers are reached over Streamable HTTP with an optional Bearer token kept in the Keychain. If a model's server rejects requests that carry tools, the app asks it again without them and stops offering tools to that model.
+
+**GitHub.** Add GitHub fills in GitHub's hosted server, `https://api.githubcopilot.com/mcp/readonly`, which offers only tools that read. Paste a [fine-grained personal access token](https://github.com/settings/personal-access-tokens/new) with read access to the repositories you want the model to see. Turning on Allow changes switches to the full server, whose tools that write ask before running. Every tool's description is sent with each message, so a small local model's context fills faster with more servers switched on.
+
+The mock server also speaks MCP at `/mcp` (all tools) and `/mcp/readonly`, with the token `mock-token`, and its models call a tool when a prompt says "use <tool name>".
+
 ## chatcli
 
 ```sh

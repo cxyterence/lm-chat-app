@@ -63,6 +63,8 @@ final class StubServer: @unchecked Sendable {
     }
 
     var searches: [String] { lock.withLock { queries } }
+    /// Answers requests to /mcp when set.
+    nonisolated(unsafe) var mcp: FakeMCP?
     var root: URL { URL(string: "http://\(host)")! }
 
     /// Bodies of streamed chat requests, oldest first. Title requests are answered "Stub Title" and left out.
@@ -116,8 +118,21 @@ final class StubProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
-        let server = Self.lock.withLock { Self.servers[request.url?.host ?? ""] }!
+        guard let server = Self.lock.withLock({ Self.servers[request.url?.host ?? ""] }) else {
+            client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil,
+                                                                  headerFields: nil)!, cacheStoragePolicy: .notAllowed)
+            return client!.urlProtocolDidFinishLoading(self)
+        }
         let body = Self.body(of: request).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        if let mcp = server.mcp, request.url?.path.hasPrefix("/mcp") == true {
+            let reply = mcp.handle(request, body: body ?? [:])
+            let response = HTTPURLResponse(url: request.url!, statusCode: reply.status, httpVersion: "HTTP/1.1",
+                                           headerFields: reply.headers)!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(reply.body.utf8))
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
         let reply = server.handle(path: request.url?.path ?? "", body: body ?? [:])
         let response = HTTPURLResponse(url: request.url!, statusCode: reply.status, httpVersion: "HTTP/1.1",
                                        headerFields: ["Content-Type": "text/event-stream"])!
@@ -175,4 +190,106 @@ func serperPage(_ titles: [String]) -> String {
 func useSerper(_ store: ChatStore, at server: StubServer) {
     store.defaults.set(server.root.absoluteString, forKey: "serperURL")
     store.setServiceKey(.serper, "test-key")
+}
+
+/// An MCP server over Streamable HTTP, to the spec: a token, a session, paged tools/list, tools/call.
+final class FakeMCP: @unchecked Sendable {
+    struct Tool {
+        var name: String
+        var readOnly: Bool
+        var result: String
+    }
+
+    let token: String
+    var tools: [Tool]
+    var pageSize = 2
+    /// Replies as SSE rather than a JSON body.
+    var sse = false
+    private let lock = NSLock()
+    private var session: String?
+    private var calls: [(name: String, arguments: [String: Any])] = []
+    private var methods: [String] = []
+
+    init(token: String = "tok", tools: [Tool]) {
+        self.token = token
+        self.tools = tools
+    }
+
+    var called: [String] { lock.withLock { calls.map(\.name) } }
+    var lastArguments: [String: Any]? { lock.withLock { calls.last?.arguments } }
+    var seen: [String] { lock.withLock { methods } }
+    func forgetSession() { lock.withLock { session = nil } }
+
+    func handle(_ request: URLRequest, body: [String: Any]) -> (status: Int, body: String, headers: [String: String]) {
+        guard request.value(forHTTPHeaderField: "Authorization") == "Bearer \(token)" else { return (401, "", [:]) }
+        let method = body["method"] as? String ?? ""
+        lock.withLock { methods.append(method) }
+        guard let id = body["id"] else { return (202, "", [:]) }
+        if method != "initialize" {
+            let sent = request.value(forHTTPHeaderField: "Mcp-Session-Id")
+            guard sent != nil, sent == lock.withLock({ session }) else { return (404, "Session not found", [:]) }
+        }
+        let params = body["params"] as? [String: Any] ?? [:]
+        var headers: [String: String] = [:]
+        let result: Any
+        switch method {
+        case "initialize":
+            let fresh = UUID().uuidString
+            lock.withLock { session = fresh }
+            headers["Mcp-Session-Id"] = fresh
+            result = ["protocolVersion": "2025-06-18", "capabilities": ["tools": [:]], "serverInfo": ["name": "fake", "version": "1"]]
+        case "tools/list":
+            let start = Int(params["cursor"] as? String ?? "0") ?? 0
+            let page = tools[start..<min(start + pageSize, tools.count)].map { tool in
+                ["name": tool.name, "description": "Does \(tool.name)",
+                 "inputSchema": ["type": "object", "properties": [:]],
+                 "annotations": ["readOnlyHint": tool.readOnly]] as [String: Any]
+            }
+            var listing: [String: Any] = ["tools": page]
+            if start + pageSize < tools.count { listing["nextCursor"] = String(start + pageSize) }
+            result = listing
+        case "tools/call":
+            let name = params["name"] as? String ?? ""
+            lock.withLock { calls.append((name, params["arguments"] as? [String: Any] ?? [:])) }
+            guard let tool = tools.first(where: { $0.name == name }) else {
+                return reply(["jsonrpc": "2.0", "id": id, "error": ["code": -32602, "message": "Unknown tool \(name)"]], headers)
+            }
+            result = ["content": [["type": "text", "text": tool.result]]]
+        default:
+            return reply(["jsonrpc": "2.0", "id": id, "error": ["code": -32601, "message": "No method \(method)"]], headers)
+        }
+        return reply(["jsonrpc": "2.0", "id": id, "result": result], headers)
+    }
+
+    private func reply(_ message: [String: Any], _ headers: [String: String]) -> (Int, String, [String: String]) {
+        let json = String(decoding: try! JSONSerialization.data(withJSONObject: message), as: UTF8.self)
+        var headers = headers
+        if sse {
+            headers["Content-Type"] = "text/event-stream"
+            let ping = #"{"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":1}}"#
+            return (200, "event: message\ndata: \(ping)\n\nevent: message\ndata: \(json)\n\n", headers)
+        }
+        headers["Content-Type"] = "application/json"
+        return (200, json, headers)
+    }
+}
+
+/// A chat stream that calls one tool.
+func toolCallReply(_ name: String, id: String = "call_1", arguments: String = "{}") -> String {
+    let event: [String: Any] = ["choices": [["index": 0, "delta": ["tool_calls": [[
+        "index": 0, "id": id, "type": "function", "function": ["name": name, "arguments": arguments],
+    ]]], "finish_reason": "tool_calls"]]]
+    return "data: " + String(decoding: try! JSONSerialization.data(withJSONObject: event), as: UTF8.self) + "\n\ndata: [DONE]\n\n"
+}
+
+/// The names of the tools a chat request offered.
+func offeredTools(_ body: [String: Any]) -> [String] {
+    (body["tools"] as? [[String: Any]] ?? []).compactMap { ($0["function"] as? [String: Any])?["name"] as? String }
+}
+
+func lastRole(_ body: [String: Any]) -> String? { (body["messages"] as? [[String: Any]])?.last?["role"] as? String }
+
+@MainActor
+func addMCP(_ store: ChatStore, at server: StubServer, token: String = "tok") {
+    store.saveMCPServer(MCPServer(name: "Fake", url: server.root.appendingPathComponent("mcp")), token: token)
 }
