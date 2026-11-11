@@ -33,6 +33,8 @@ A bare host gets `http://` and `/v1` added. Anything with an explicit scheme or 
 
 The photo button beside the message field attaches up to four photos. Each is downscaled to 1536 px on its long edge and sent as a JPEG `image_url` part, so the model has to accept images. A text-only model's refusal shows in the error banner. Photos are saved as files in `images/` beside `conversations.json`, which holds only their IDs, so saving a chat stays fast however many photos it has.
 
+Pick an image model and the message field asks for a description. The prompt goes to `/v1/images/generations` and the picture comes back in the reply. Tap it to view it full screen, or long-press to share or save it. An image model sees only your newest message, so it keeps no history and ignores attached photos, and slash commands are off. The app knows a model makes images when an SGLang diffusion server lists it with a task type ending in `2i` (such as `t2i`), or when OpenAI lists it as `gpt-image-*` or `chatgpt-image-latest`. The mock server's `mock-image` model behaves the same way.
+
 Long-press a message you sent and choose Edit to change it. Sending the edit asks the model again from that point and erases everything after it. Photos only the erased messages used are deleted.
 
 Type `/` in the message field to see commands. `/compact` asks the model to summarize the chat so far, then sends that summary in place of the earlier messages, which stay on screen. Text after the command, like `/compact keep the code`, tells it what to make sure it keeps. A summary that fails, is stopped, or hits the model's output limit is thrown away so no history is lost. A message that starts with `/` but names no command is sent as ordinary text.
@@ -55,7 +57,7 @@ swift run chatcli --base 127.0.0.1:1234 --title "what is NVFP4?"
 swift run chatcli --base 127.0.0.1:1234 --model <id> --image photo.heic "What is in this photo?"
 ```
 
-Reasoning goes to stderr dimmed, the answer to stdout. Failures exit non-zero. `--title` prints the title the app would give a chat starting with that prompt. `--efforts` prints the reasoning effort levels the model accepts, the same check the app runs before showing its effort slider. `--image` attaches a photo, prepared the way the app prepares one, and can repeat.
+Reasoning goes to stderr dimmed, the answer to stdout. Failures exit non-zero. `--title` prints the title the app would give a chat starting with that prompt. `--efforts` prints the reasoning effort levels the model accepts, the same check the app runs before showing its effort slider. `--image` attaches a photo, prepared the way the app prepares one, and can repeat. `--image-out <file>` sends the prompt to an image model and writes the picture it returns.
 
 ## Smoke test against your server
 

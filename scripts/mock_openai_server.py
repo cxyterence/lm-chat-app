@@ -11,6 +11,8 @@ On mock-reasoning, "/long" streams a long bursty reasoning section first.
 On mock-reasoning, "/huge" streams ~20k characters of reasoning then ~6k of Markdown, fast, as a load test.
 "/spans" streams inline formatting slowly, three characters at a time, to show half-finished spans.
 Image parts are acknowledged with their sizes, except by mock-think, which rejects them like a text-only model.
+mock-image is listed the way SGLang lists a diffusion model and answers /v1/images/generations with a PNG.
+"draw fail" is refused. Set MOCK_IMAGE_LINKS=1 to answer with a link to fetch, as SGLang can, in place of base64.
 Set MOCK_API_KEY to require `Authorization: Bearer <key>`. Set MOCK_EXTRA_MODELS=96 to list a long model list like OpenAI's.
 """
 import argparse
@@ -20,7 +22,9 @@ import re
 import json
 import os
 import random
+import struct
 import time
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MODELS = ["mock-chat", "mock-reasoning", "mock-ollama", "mock-think"]
@@ -29,6 +33,24 @@ MODELS += [f"mock-extra-{i:03}" for i in range(int(os.environ.get("MOCK_EXTRA_MO
 # Like vLLM with the user's template. Other models ignore reasoning_effort, as llama.cpp does.
 EFFORTS = {"mock-reasoning": {"none", "low", "medium", "xhigh"}}
 TEXT_ONLY = {"mock-think"}
+IMAGE_MODEL = "mock-image"
+
+
+def png(width=768, height=512):
+    """A gradient with a sun, so a screenshot shows the picture arrived the right way up and uncropped."""
+    rows = b""
+    for y in range(height):
+        row = bytearray()
+        for x in range(width):
+            sun = (x - width * 0.72) ** 2 + (y - height * 0.3) ** 2 < (height * 0.16) ** 2
+            row += bytes((255, 214, 90) if sun else (40 + 150 * x // width, 70 + 120 * y // height, 190 - 90 * y // height))
+        rows += b"\x00" + bytes(row)
+
+    def part(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    return (b"\x89PNG\r\n\x1a\n" + part(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + part(b"IDAT", zlib.compress(rows)) + part(b"IEND", b""))
 
 
 MCP_TOOLS = [
@@ -124,8 +146,16 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorized():
             return
         if self.path.rstrip("/") == "/v1/models":
+            image = {"id": IMAGE_MODEL, "object": "model", "task_type": "t2i", "supported_task_types": ["t2i"]}
             self.send_json(200, {"object": "list",
-                                 "data": [{"id": m, "object": "model"} for m in MODELS]})
+                                 "data": [{"id": m, "object": "model"} for m in MODELS] + [image]})
+        elif re.fullmatch(r"/v1/images/[^/]+/content", self.path):
+            data = png()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
         else:
             self.send_json(404, {"error": {"message": "not found"}})
 
@@ -188,6 +218,16 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def image(self, body):
+        if not body.get("prompt"):
+            return self.send_json(400, {"error": {"message": "prompt is required"}})
+        if "fail" in body["prompt"]:
+            return self.send_json(400, {"error": {"message": "Your request was rejected by the safety system."}})
+        time.sleep(float(os.environ.get("MOCK_IMAGE_SECONDS", "2")))
+        if os.environ.get("MOCK_IMAGE_LINKS"):
+            return self.send_json(200, {"created": int(time.time()), "data": [{"url": "/v1/images/mock/content"}]})
+        self.send_json(200, {"created": int(time.time()), "data": [{"b64_json": base64.b64encode(png()).decode()}]})
+
     def do_POST(self):
         if self.path.rstrip("/") == "/search":
             return self.search()
@@ -195,9 +235,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.mcp()
         if not self.authorized():
             return
+        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+        if self.path.rstrip("/") == "/v1/images/generations":
+            return self.image(body)
         if self.path.rstrip("/") != "/v1/chat/completions":
             return self.send_json(404, {"error": {"message": "not found"}})
-        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+        if body.get("model") == IMAGE_MODEL:
+            return self.send_json(404, {"error": {"message": "This server only generates images."}})
         model = body.get("model", "mock-chat")
         if model not in MODELS:
             return self.send_json(404, {"error": {"message": f"model '{model}' not found"}})
