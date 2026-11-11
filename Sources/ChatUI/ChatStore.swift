@@ -38,7 +38,7 @@ public final class ChatStore {
     enum ModelsState: Equatable {
         case idle
         case loading
-        case loaded([String])
+        case loaded([ServedModel])
         case failed(String)
     }
 
@@ -147,6 +147,8 @@ public final class ChatStore {
     }
 
     var model: String { activeConnection?.model ?? "" }
+    /// Whether the selected model answers with a picture in place of text.
+    var makesImages: Bool { activeConnection?.makesImages ?? false }
     var systemPrompt: String { activeConnection?.systemPrompt ?? "" }
 
     func apiKey(for id: UUID) -> String { apiKeys[id] ?? "" }
@@ -154,7 +156,7 @@ public final class ChatStore {
     var isConfigured: Bool { config != nil }
 
     var availableModels: [String] {
-        if case .loaded(let ids) = models { return ids }
+        if case .loaded(let served) = models { return served.map(\.id) }
         return []
     }
 
@@ -191,9 +193,12 @@ public final class ChatStore {
     }
 
     func selectModel(_ model: String) {
+        var makesImages = false
+        if case .loaded(let served) = models { makesImages = served.first { $0.id == model }?.makesImages ?? false }
         guard let index = connections.firstIndex(where: { $0.id == activeConnectionID }),
-              connections[index].model != model else { return }
+              connections[index].model != model || connections[index].makesImages != makesImages else { return }
         connections[index].model = model
+        connections[index].makesImages = makesImages
         persistConnections()
         checkEffortLevels()
     }
@@ -354,6 +359,10 @@ public final class ChatStore {
             effortLevels = .failed
             return
         }
+        guard !makesImages else {
+            effortLevels = .known([])
+            return
+        }
         let model = model
         effortLevels = .checking
         effortCheck = Task {
@@ -381,14 +390,13 @@ public final class ChatStore {
         }
         models = .loading
         do {
-            let ids = try await ChatClient(config: config, session: session).models()
+            let served = try await ChatClient(config: config, session: session).models()
             guard connectionID == activeConnectionID else { return }
-            models = .loaded(ids)
-            if !ids.contains(model), let first = ids.first {
-                selectModel(first)
-            } else {
-                checkEffortLevels()
-            }
+            models = .loaded(served)
+            // Selecting the model again picks up whether the server says it makes images.
+            let before = activeConnection
+            selectModel(served.contains { $0.id == model } ? model : served.first?.id ?? model)
+            if activeConnection == before { checkEffortLevels() }
         } catch {
             guard connectionID == activeConnectionID else { return }
             models = .failed(error.localizedDescription)
@@ -459,7 +467,7 @@ public final class ChatStore {
         conversations[index].model = model
         conversations[index].messages.append(message)
         startStreaming(conversationID: id)
-        if isFirstPrompt && !message.content.isEmpty { generateTitle(for: id, prompt: message.content) }
+        if isFirstPrompt && !message.content.isEmpty && !makesImages { generateTitle(for: id, prompt: message.content) }
     }
 
     /// Replaces a sent message and asks again from there. Everything after it is erased, along with photos
@@ -516,7 +524,8 @@ public final class ChatStore {
 
     /// Why a command can't run in the selected chat right now, or nil when it can.
     func unavailableReason(_ command: SlashCommand) -> String? {
-        switch command {
+        if makesImages { return "Not available with an image model" }
+        return switch command {
         case .compact:
             Compaction.hasNewMessages(selectedConversation?.messages ?? []) ? nil : "Nothing to compact yet"
         case .webSearch:
@@ -572,6 +581,14 @@ public final class ChatStore {
         let (model, effort, systemPrompt, images) = (model, reasoningEffort, systemPrompt, images)
         var current = first
         var outcome = Outcome.completed
+        if makesImages, request == .reply {
+            do {
+                try await draw(conversationID: id, into: first, model: model, client: client)
+            } catch {
+                outcome = Task.isCancelled ? .cancelled : .failed(error.localizedDescription)
+            }
+            return finish(conversationID: id, messageID: first, request: request, outcome: outcome)
+        }
         do {
             try await searchIfNeeded(conversationID: id)
             let tools = request == .reply ? await offeredTools() : []
@@ -595,6 +612,24 @@ public final class ChatStore {
             outcome = Task.isCancelled ? .cancelled : .failed(error.localizedDescription)
         }
         finish(conversationID: id, messageID: current, request: request, outcome: outcome)
+    }
+
+    /// An image model sees only the newest message. It keeps no history, and photos sent with it are ignored.
+    private func draw(conversationID id: UUID, into messageID: UUID, model: String, client: ChatClient) async throws {
+        let prompt = conversations.first { $0.id == id }?.messages.last { $0.role == .user }?.content ?? ""
+        guard !prompt.isEmpty else { throw ImageFailure.noPrompt }
+        liveReply?.status = "Generating image…"
+        let bytes = try await client.image(model: model, prompt: prompt)
+        // Stored like every other photo, as a JPEG, large enough to save or share.
+        guard let jpeg = await Task.detached(operation: { ImageAttachment.jpeg(from: bytes, maxPixels: 2048) }).value else {
+            throw ImageFailure.unreadable
+        }
+        try Task.checkCancellation()
+        let image = try images.save(jpeg)
+        guard let c = conversations.firstIndex(where: { $0.id == id }),
+              let m = conversations[c].messages.firstIndex(where: { $0.id == messageID })
+        else { return images.remove([image]) }
+        conversations[c].messages[m].images = [image]
     }
 
     private func beginOutput(in id: UUID, role: Role) -> UUID {
@@ -689,7 +724,7 @@ public final class ChatStore {
             }
             let keep = message.role == .summary
                 ? outcome == .completed
-                : !(message.content.isEmpty && message.reasoning.isEmpty && message.toolCalls.isEmpty)
+                : !(message.content.isEmpty && message.reasoning.isEmpty && message.toolCalls.isEmpty && message.images.isEmpty)
             if !keep { conversations[c].messages.remove(at: m) }
             conversations[c].updatedAt = Date()
         }
@@ -708,6 +743,17 @@ public final class ChatStore {
             persistenceError = nil
         } catch {
             persistenceError = "Couldn't save chats: \(error.localizedDescription)"
+        }
+    }
+}
+
+private enum ImageFailure: LocalizedError {
+    case noPrompt, unreadable
+
+    var errorDescription: String? {
+        switch self {
+        case .noPrompt: "Describe the picture you want. Image models need a text prompt."
+        case .unreadable: "The server's reply wasn't a picture the app could read."
         }
     }
 }

@@ -9,7 +9,7 @@ public struct ChatClient: Sendable {
         self.session = session
     }
 
-    public func models() async throws -> [String] {
+    public func models() async throws -> [ServedModel] {
         var request = URLRequest(url: config.baseURL.appendingPathComponent("models"))
         request.timeoutInterval = 15
         authorize(&request)
@@ -22,8 +22,45 @@ public struct ChatClient: Sendable {
         guard let list = try? JSONDecoder().decode(WireModelList.self, from: data) else {
             throw ChatClientError.invalidResponse
         }
-        let ids = list.data.map(\.id)
-        return (config.baseURL.host() == OpenAIModels.host ? ids.filter(OpenAIModels.isOffered) : ids).sorted()
+        let models = if config.baseURL.host() == OpenAIModels.host {
+            list.data.filter { OpenAIModels.isOffered($0.id) }
+                .map { ServedModel(id: $0.id, makesImages: OpenAIModels.makesImages($0.id)) }
+        } else {
+            list.data.map { entry in
+                let tasks = (entry.supportedTaskTypes ?? []) + [entry.taskType].compactMap { $0 }
+                return ServedModel(id: entry.id, makesImages: tasks.contains { $0.lowercased().hasSuffix("2i") })
+            }
+        }
+        return models.sorted { $0.id < $1.id }
+    }
+
+    /// Asks an image model for one picture and returns its bytes as the server encoded them.
+    public func image(model: String, prompt: String) async throws -> Data {
+        var request = URLRequest(url: config.baseURL.appendingPathComponent("images/generations"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 600
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        authorize(&request)
+        request.httpBody = try JSONEncoder().encode(WireImageRequest(model: model, prompt: prompt))
+
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw ChatClientError.invalidResponse }
+        guard (200..<300).contains(http.statusCode) else { throw Self.httpError(status: http.statusCode, body: data) }
+        guard let image = (try? JSONDecoder().decode(WireImageResponse.self, from: data))?.data.first else {
+            throw ChatClientError.invalidResponse
+        }
+        if let bytes = image.base64.flatMap({ Data(base64Encoded: $0, options: .ignoreUnknownCharacters) }) { return bytes }
+        // SGLang links to its own /v1/images/<id>/content with a path and no host.
+        guard let url = image.url.flatMap({ URL(string: $0, relativeTo: config.baseURL)?.absoluteURL }) else {
+            throw ChatClientError.invalidResponse
+        }
+        var download = URLRequest(url: url)
+        if url.host() == config.baseURL.host() { authorize(&download) }
+        let (bytes, fetched) = try await session.data(for: download)
+        guard let status = (fetched as? HTTPURLResponse)?.statusCode, (200..<300).contains(status) else {
+            throw ChatClientError.invalidResponse
+        }
+        return bytes
     }
 
     public func stream(
@@ -98,7 +135,8 @@ public struct ChatClient: Sendable {
             WireChatRequest(
                 model: model,
                 messages: messages.flatMap {
-                    WireMessage.expanding($0, images: $0.images.compactMap { id in images?.data(for: id) })
+                    // Only the user's photos go to the model. Pictures a model drew stay on screen.
+                    WireMessage.expanding($0, images: $0.role == .user ? $0.images.compactMap { id in images?.data(for: id) } : [])
                 },
                 stream: true,
                 reasoningEffort: reasoningEffort,

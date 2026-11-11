@@ -150,8 +150,39 @@ struct WireChunk: Decodable {
 }
 
 struct WireModelList: Decodable {
-    struct Entry: Decodable { let id: String }
+    /// SGLang's diffusion server says what each model generates, such as "t2i". Chat servers leave these out.
+    struct Entry: Decodable {
+        let id: String
+        let taskType: String?
+        let supportedTaskTypes: [String]?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case taskType = "task_type"
+            case supportedTaskTypes = "supported_task_types"
+        }
+    }
     let data: [Entry]
+}
+
+struct WireImageRequest: Encodable {
+    let model: String
+    let prompt: String
+    let n = 1
+}
+
+/// Each image arrives inline as base64 or as a link to fetch, depending on the server and model.
+struct WireImageResponse: Decodable {
+    struct Image: Decodable {
+        let base64: String?
+        let url: String?
+
+        enum CodingKeys: String, CodingKey {
+            case base64 = "b64_json"
+            case url
+        }
+    }
+    let data: [Image]
 }
 
 /// Accepts both `{"error":{"message":...}}` and `{"error":"..."}`.

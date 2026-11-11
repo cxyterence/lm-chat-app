@@ -1,5 +1,6 @@
 import ChatCore
 import PhotosUI
+import QuickLook
 import SwiftUI
 
 struct ChatView: View {
@@ -24,7 +25,7 @@ struct ChatView: View {
                 ErrorBanner(message: message, retry: store.retry, dismiss: store.dismissFailure)
             }
             Composer(draft: $draft, images: $draftImages, store: store.images, focused: $composerFocused, streaming: streaming,
-                     canSend: store.canSend, editing: editing != nil, unavailable: store.unavailableReason,
+                     canSend: store.canSend, imageModel: store.makesImages, editing: editing != nil, unavailable: store.unavailableReason,
                      send: send, stop: store.stop, cancelEdit: cancelEdit)
         }
         .foregroundStyle(palette.text)
@@ -173,7 +174,7 @@ private struct MessageRow: View {
             }
         case .assistant:
             HStack {
-                AssistantBubble(message: message, isStreaming: isStreaming, reply: reply, approval: approval, resolve: resolve)
+                AssistantBubble(message: message, images: message.images.map(images.url), isStreaming: isStreaming, reply: reply, approval: approval, resolve: resolve)
                 Spacer(minLength: 48)
             }
         case .summary:
@@ -186,6 +187,8 @@ private struct MessageRow: View {
 
 private struct AssistantBubble: View {
     let message: ChatMessage
+    /// Pictures an image model drew for this reply.
+    let images: [URL]
     let isStreaming: Bool
     let reply: LiveReply?
     let approval: String?
@@ -229,6 +232,7 @@ private struct AssistantBubble: View {
                         .textSelection(.enabled)
                 }
             }
+            ForEach(images, id: \.self) { GeneratedImage(url: $0) }
             if !toolCalls.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(toolCalls) { call in
@@ -250,8 +254,29 @@ private struct AssistantBubble: View {
             }
         }
         .contextMenu {
-            Button("Copy", systemImage: "doc.on.doc") { copyToPasteboard(content) }
+            if !content.isEmpty { Button("Copy", systemImage: "doc.on.doc") { copyToPasteboard(content) } }
         }
+    }
+}
+
+/// A picture the model drew. Tap to see it full screen. Hold to share it or save it to Photos.
+private struct GeneratedImage: View {
+    let url: URL
+    @State private var preview: URL?
+
+    var body: some View {
+        Button { preview = url } label: {
+            AttachmentImage(url: url, maxPixels: 1024)
+                .scaledToFit()
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .frame(maxWidth: 320, maxHeight: 420, alignment: .leading)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Generated image")
+        .contextMenu {
+            ShareLink(item: url) { Label("Share or Save", systemImage: "square.and.arrow.up") }
+        }
+        .quickLookPreview($preview)
     }
 }
 
@@ -613,6 +638,8 @@ private struct Composer: View {
     var focused: FocusState<Bool>.Binding
     let streaming: Bool
     let canSend: Bool
+    /// An image model takes a description and no photos.
+    let imageModel: Bool
     let editing: Bool
     let unavailable: (SlashCommand) -> String?
     let send: () -> Void
@@ -641,13 +668,14 @@ private struct Composer: View {
             if !images.isEmpty || loading > 0 { attachments }
             HStack(alignment: .bottom, spacing: 8) {
                 let plus = CircleIcon(systemImage: "plus", size: height,
-                                      foreground: room > 0 ? palette.text : palette.secondaryText, background: palette.fill)
+                                      foreground: room > 0 && !imageModel ? palette.text : palette.secondaryText,
+                                      background: palette.fill)
                 PhotosPicker(selection: $picks, maxSelectionCount: max(room, 1), selectionBehavior: .ordered,
                              matching: .images) {
                     Label { Text("Add Photos") } icon: { plus }.labelStyle(.iconOnly)
                 }
-                .disabled(room <= 0)
-                TextField("Message", text: $draft, axis: .vertical)
+                .disabled(room <= 0 || imageModel)
+                TextField(imageModel ? "Describe an image" : "Message", text: $draft, axis: .vertical)
                     .lineLimit(1...6)
                     .focused(focused)
                     .textFieldStyle(.plain)

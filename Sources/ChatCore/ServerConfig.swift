@@ -1,5 +1,16 @@
 import Foundation
 
+/// A model the server offers, and whether it answers with pictures in place of text.
+public struct ServedModel: Equatable, Sendable {
+    public let id: String
+    public let makesImages: Bool
+
+    public init(id: String, makesImages: Bool = false) {
+        self.id = id
+        self.makesImages = makesImages
+    }
+}
+
 public struct ServerConfig: Codable, Equatable, Sendable {
     public var baseURL: URL
     public var apiKey: String?

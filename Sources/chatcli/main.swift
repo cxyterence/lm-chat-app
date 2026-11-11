@@ -11,6 +11,7 @@ struct Options {
     var effort: ReasoningEffort?
     var prompt: String?
     var images: [String] = []
+    var imageOut: String?
 }
 
 func write(_ text: String, to handle: FileHandle) {
@@ -22,7 +23,7 @@ func fail(_ message: String) -> Never {
     exit(1)
 }
 
-let usage = "usage: chatcli --base <url> [--key K] [--model M] [--models] [--efforts] [--title] [--effort <\(ReasoningEffort.allCases.map(\.rawValue).joined(separator: "|"))>] [--image <file>]... \"prompt\""
+let usage = "usage: chatcli --base <url> [--key K] [--model M] [--models] [--efforts] [--title] [--effort <\(ReasoningEffort.allCases.map(\.rawValue).joined(separator: "|"))>] [--image <file>]... [--image-out <file>] \"prompt\""
 
 func parseOptions(_ args: [String]) -> Options {
     var options = Options()
@@ -43,6 +44,7 @@ func parseOptions(_ args: [String]) -> Options {
             }
             options.effort = effort
         case "--image": options.images.append(value(for: arg))
+        case "--image-out": options.imageOut = value(for: arg)
         case "--models": options.listModels = true
         case "--title": options.titleOnly = true
         case "--efforts": options.listEfforts = true
@@ -59,10 +61,10 @@ func run(_ options: Options) async throws {
 
     let models = try await client.models()
     if options.listModels {
-        models.forEach { print($0) }
+        models.forEach { print($0.makesImages ? "\($0.id)  (image)" : $0.id) }
         return
     }
-    guard let model = options.model ?? models.first else { fail("server lists no models; pass --model") }
+    guard let model = options.model ?? models.first?.id else { fail("server lists no models; pass --model") }
     if options.listEfforts {
         let levels = try await client.reasoningEfforts(model: model)
         print(levels.isEmpty ? "(not adjustable)" : levels.map(\.rawValue).joined(separator: " "))
@@ -72,6 +74,12 @@ func run(_ options: Options) async throws {
     if options.titleOnly {
         guard let title = try await client.title(model: model, for: prompt) else { fail("model gave no usable title") }
         print(title)
+        return
+    }
+
+    if let path = options.imageOut {
+        try await client.image(model: model, prompt: prompt).write(to: URL(fileURLWithPath: path))
+        print("wrote \(path)")
         return
     }
 

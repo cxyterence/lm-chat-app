@@ -63,6 +63,13 @@ final class StubServer: @unchecked Sendable {
     }
 
     var searches: [String] { lock.withLock { queries } }
+    /// The body of GET /v1/models when set. Otherwise the model list is a 404.
+    nonisolated(unsafe) var models: String?
+    /// Answers POST /v1/images/generations when set.
+    nonisolated(unsafe) var image: (@Sendable ([String: Any]) -> Reply)?
+    private var drawings: [[String: Any]] = []
+    /// Bodies of image requests, oldest first.
+    var drawn: [[String: Any]] { lock.withLock { drawings } }
     /// Answers requests to /mcp when set.
     nonisolated(unsafe) var mcp: FakeMCP?
     var root: URL { URL(string: "http://\(host)")! }
@@ -83,6 +90,11 @@ final class StubServer: @unchecked Sendable {
             let query = body["q"] as? String ?? ""
             lock.withLock { queries.append(query) }
             return search(query)
+        }
+        if path.hasSuffix("/models"), let models { return (200, models) }
+        if path.hasSuffix("images/generations"), let image {
+            lock.withLock { drawings.append(body) }
+            return image(body)
         }
         guard path.hasSuffix("chat/completions"), body["stream"] as? Bool == true else { return (404, "") }
         if transcript(body).first?.text.hasPrefix("You name chat conversations") == true { return (200, sse(["Stub Title"])) }

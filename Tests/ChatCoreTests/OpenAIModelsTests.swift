@@ -24,8 +24,16 @@ struct OpenAIModelsTests {
         """.split(separator: " ").map(String.init)
 
     @Test func offersGPT6AndLaterTextModelsPlusGPT4oMini() {
-        #expect(Self.listed.filter(OpenAIModels.isOffered)
+        #expect(Self.listed.filter { OpenAIModels.isOffered($0) && !OpenAIModels.makesImages($0) }
                 == ["gpt-4o-mini", "gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol", "gpt-6.1-terra"])
+    }
+
+    @Test func offersImageModelsWithoutTheirSnapshots() {
+        #expect(Self.listed.filter(OpenAIModels.makesImages) == [
+            "chatgpt-image-latest", "gpt-image-1-mini", "gpt-image-1.5", "gpt-image-2", "gpt-image-2.5-flare",
+            "gpt-image-2.5-sunburst", "gpt-image-2.6-flare", "gpt-image-2.6-sunburst",
+        ])
+        #expect(Self.listed.filter(OpenAIModels.makesImages).allSatisfy(OpenAIModels.isOffered))
     }
 
     @Test(arguments: ["gpt-7", "gpt-6.2-mini", "gpt-10-pro", "gpt-6-codex"])
@@ -33,13 +41,13 @@ struct OpenAIModelsTests {
         #expect(OpenAIModels.isOffered(id))
     }
 
-    @Test(arguments: ["gpt-6-tts", "gpt-6-realtime", "gpt-6-luna-2027-01-15", "gpt-image-6", "gpt-6-audio-mini"])
+    @Test(arguments: ["gpt-6-tts", "gpt-6-realtime", "gpt-6-luna-2027-01-15", "gpt-image-6-2027-01-15", "gpt-6-audio-mini"])
     func laterNonTextModelsAndSnapshotsAreNot(id: String) {
         #expect(!OpenAIModels.isOffered(id))
     }
 
     @Test func otherServersKeepTheirWholeList() async throws {
         let server = StubServer { _ in (200, #"{"data":[{"id":"text-embedding-3-small"},{"id":"qwen"}]}"#) }
-        #expect(try await server.client.models() == ["qwen", "text-embedding-3-small"])
+        #expect(try await server.client.models().map(\.id) == ["qwen", "text-embedding-3-small"])
     }
 }
