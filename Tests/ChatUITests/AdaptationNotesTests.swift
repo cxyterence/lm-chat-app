@@ -70,13 +70,13 @@ struct AdaptationNotesTests {
         let first = try #require(replies(rig.store).first)
         #expect(first.adaptations == [.toolsDropped(reason: reason)])
         let tried = rig.store.exchanges(for: first.id)
-        #expect(tried.map(\.status) == [400, 200], "the refused request stays visible beside the one that worked")
+        #expect(tried.map(\.status) == [400, 400, 200], "the refused request, its repeat without token counts and the one that worked")
         #expect(tried[0].error?.contains(reason) == true)
 
         rig.store.send("again")
         await untilIdle(rig.store)
         #expect(replies(rig.store).last?.adaptations == [.toolsDropped(reason: reason)])
-        #expect(server.chats.map { offeredTools($0).isEmpty } == [false, true, true])
+        #expect(server.asked.map { offeredTools($0).isEmpty } == [false, true, true])
 
         let saved = rig.reopened().conversations.first?.messages.filter { $0.role == .assistant }
         #expect(saved?.map(\.adaptations) == [[.toolsDropped(reason: reason)], [.toolsDropped(reason: reason)]], "kept across a relaunch")
@@ -96,12 +96,12 @@ struct AdaptationNotesTests {
 
         rig.store.send("who am I?")
         await untilIdle(rig.store)
-        #expect(server.chats.map { $0["reasoning_effort"] as? String } == ["medium", "none", "none"], "learned from the first refusal")
+        #expect(server.asked.map { $0["reasoning_effort"] as? String } == ["medium", "none", "none"], "learned from the first refusal")
         #expect(replies(rig.store).map(\.adaptations) == [[.reasoningOffForTools], [.reasoningOffForTools]], "each round says so")
 
         rig.store.send("again")
         await untilIdle(rig.store)
-        #expect(server.chats.dropFirst(3).map { $0["reasoning_effort"] as? String } == ["none", "none"], "no failed request this time")
+        #expect(server.asked.dropFirst(3).map { $0["reasoning_effort"] as? String } == ["none", "none"], "no failed request this time")
         #expect(replies(rig.store).suffix(2).allSatisfy { $0.adaptations == [.reasoningOffForTools] })
 
         let saved = rig.reopened().conversations.first?.messages.filter { $0.role == .assistant }
@@ -176,6 +176,68 @@ struct AdaptationNotesTests {
         rig.store.send("hello")
         await untilIdle(rig.store)
         #expect(other.chats.first?["stream_options"] != nil, "another host is asked")
+    }
+
+    @Test func aTitleNeverAsksForTokenCounts() async throws {
+        let server = echoServer()
+        let rig = Rig(server: server)
+        defer { rig.cleanup() }
+
+        rig.store.send("hello")
+        await untilIdle(rig.store)
+        for _ in 0..<400 where server.titles.isEmpty { try? await Task.sleep(for: .milliseconds(5)) }
+
+        #expect(server.titles.count == 1)
+        #expect(server.titles.allSatisfy { $0["stream_options"] == nil })
+        #expect(server.chats.allSatisfy { $0["stream_options"] != nil }, "the reply itself still does")
+    }
+
+    @Test func aToolsRefusalIsNotMistakenForARefusalOfTokenCounts() async throws {
+        let server = StubServer { body in
+            if body["tools"] != nil, body["reasoning_effort"] as? String != "none" { return (400, Self.lunaRefusal) }
+            if lastRole(body) == "tool" { return (200, sse(["done"])) }
+            return offeredTools(body).contains("get_me") ? (200, toolCallReply("get_me")) : (200, sse(["plain"]))
+        }
+        _ = addGetMe(to: server)
+        let rig = Rig(server: server)
+        defer { rig.cleanup() }
+        addMCP(rig.store, at: server)
+        rig.store.setReasoningEffort(.medium)
+
+        rig.store.send("who am I?")
+        await untilIdle(rig.store)
+        rig.store.send("again")
+        await untilIdle(rig.store)
+
+        #expect(replies(rig.store).flatMap(\.adaptations).allSatisfy { $0 == .reasoningOffForTools }, "no note about token counts")
+        #expect(replies(rig.store).map(\.adaptations) == Array(repeating: [.reasoningOffForTools], count: 4))
+        #expect(server.chats.map { $0["stream_options"] != nil } == [true, false, true, true, true, true],
+                "the refusal is repeated bare once, and token counts are still asked for after it")
+        #expect(server.chats.dropFirst(2).allSatisfy { $0["reasoning_effort"] as? String == "none" })
+    }
+
+    @Test func aRefusalOfTokenCountsIsRememberedPerServerAddressNotPerHost() async throws {
+        let server = StubServer { body in
+            body["stream_options"] != nil ? (400, #"{"error":{"message":"Bad Request"}}"#) : (200, sse(["Hi"]))
+        }
+        let rig = Rig(server: server)
+        defer { rig.cleanup() }
+        let (first, second) = (Connection(name: "a", baseURL: URL(string: "http://\(server.host):8081/v1")!, model: "m"),
+                               Connection(name: "b", baseURL: URL(string: "http://\(server.host):8082/v1")!, model: "m"))
+        rig.store.saveConnection(first, apiKey: "")
+        rig.store.saveConnection(second, apiKey: "")
+
+        rig.store.activate(first.id)
+        rig.store.send("one")
+        await untilIdle(rig.store)
+        rig.store.send("two")
+        await untilIdle(rig.store)
+        #expect(server.chats.map { $0["stream_options"] != nil } == [true, false, false])
+
+        rig.store.activate(second.id)
+        rig.store.send("three")
+        await untilIdle(rig.store)
+        #expect(server.chats.map { $0["stream_options"] != nil } == [true, false, false, true, false], "the other port is asked afresh")
     }
 
     private func drawing(_ arguments: String) -> (server: StubServer, rig: Rig) {

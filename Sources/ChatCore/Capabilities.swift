@@ -146,8 +146,11 @@ extension ChatClient {
         return fields["meta"]?["n_ctx_train"]?.whole
     }
 
+    private static let secretWords = ["key", "secret", "password", "passwd", "authorization", "bearer", "credential", "cookie"]
+
     /// The scalars of both sources, nested objects named like `meta.n_vocab`, in name order. Anything named
-    /// like a secret, such as SGLang's `api_key`, is left out, and so is any value equal to the connection's key.
+    /// like a secret, such as SGLang's `api_key`, is left out. So is any value equal to the connection's key, and
+    /// any that contains it when it is long enough (8 characters) not to match by chance, as a launch command does.
     static func facts(entry: [String: JSONValue]?, serverInfo: JSONValue?, apiKey: String?) -> [Fact] {
         var facts: [Fact] = []
         if let entry {
@@ -156,8 +159,9 @@ extension ChatClient {
         if let serverInfo { collect(serverInfo, prefix: "", into: &facts) }
         return facts.filter { fact in
             let name = fact.name.lowercased()
-            let secret = ["key", "secret", "password", "passwd"].contains { name.contains($0) } || name.hasSuffix("token")
-            return !secret && (apiKey?.isEmpty != false || fact.value != apiKey)
+            if secretWords.contains(where: name.contains) || name.hasSuffix("token") { return false }
+            guard let apiKey, !apiKey.isEmpty else { return true }
+            return fact.value != apiKey && !(apiKey.count >= 8 && fact.value.contains(apiKey))
         }
     }
 

@@ -34,13 +34,13 @@ extension ChatClient {
         }
     }
 
-    /// Posts `rawBody` as is, for a request the user edited. The key goes only to the connection's own host.
+    /// Sends `rawBody` as is with `method`, for a request the user edited. The key goes only to the connection's own host.
     /// Whatever comes back, streamed or not, is read to the end as text. Failure is in the returned exchange's
     /// `error`, never thrown. Like every request, it is also passed to `record`.
     @discardableResult
-    public func send(rawBody: Data, to url: URL, contentType: String) async -> Exchange {
+    public func send(rawBody: Data, to url: URL, contentType: String, method: String = "POST") async -> Exchange {
         var request = URLRequest(url: url)
-        request.httpMethod = "POST"
+        request.httpMethod = method
         request.timeoutInterval = 600
         request.setValue(contentType, forHTTPHeaderField: "Content-Type")
         if url.host() == config.baseURL.host() { authorize(&request) }
@@ -58,23 +58,27 @@ extension ChatClient {
     }
 }
 
-/// Assembles bytes into lines on `\n`, so the raw text of a stream, blank separator lines included, is kept
-/// as it arrived.
+/// Assembles bytes into lines. A line ends on CR, LF or CRLF, as `bytes.lines` has it, and a blank line comes out
+/// as an empty string.
 struct LineBuffer {
     private var bytes: [UInt8] = []
+    private var afterCR = false
 
     mutating func push(_ byte: UInt8) -> String? {
-        guard byte == 0x0A else {
+        let followsCR = afterCR
+        afterCR = byte == 0x0D
+        switch byte {
+        case 0x0A where followsCR: return nil
+        case 0x0A, 0x0D: return flush() ?? ""
+        default:
             bytes.append(byte)
             return nil
         }
-        return flush() ?? ""
     }
 
     mutating func flush() -> String? {
         guard !bytes.isEmpty else { return nil }
         defer { bytes.removeAll(keepingCapacity: true) }
-        let line = bytes.last == 0x0D ? bytes.dropLast() : bytes[...]
-        return String(decoding: line, as: UTF8.self)
+        return String(decoding: bytes, as: UTF8.self)
     }
 }

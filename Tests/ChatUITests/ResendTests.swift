@@ -105,6 +105,22 @@ struct ResendTests {
         #expect(stranger.authorizations.last?.authorization == nil, "the key is for its own server only")
     }
 
+    @Test func aRequestIsResentWithItsOwnMethod() async throws {
+        let server = echo()
+        let rig = Rig(server: server)
+        defer { rig.cleanup() }
+        rig.store.send("hello")
+        await untilIdle(rig.store)
+        let message = try reply(rig.store)
+        var original = try #require(rig.store.exchanges(for: message.id).first)
+        original.method = "PUT"
+
+        let sent = await rig.store.resend(original, editedText: original.displayBody, for: message.id)
+
+        #expect(sent.method == "PUT")
+        #expect(server.methods.last == "PUT")
+    }
+
     @Test func aReplyThatIsGoneTakesNoNewRequests() async throws {
         let rig = Rig(server: echo())
         defer { rig.cleanup() }

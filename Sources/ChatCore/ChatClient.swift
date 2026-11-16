@@ -81,9 +81,11 @@ public struct ChatClient: Sendable {
         return bytes
     }
 
-    /// `includeUsage` asks for a final chunk with token counts. A server that refuses the field with a 400, or a
-    /// 422 as FastAPI validation gives, is asked again without it. That shows as `.adapted(.usageNotRequested)`
-    /// before the retried stream. Pass false for a host that already refused.
+    /// `includeUsage` asks for a final chunk with token counts. A server that answers a request carrying it with a 400
+    /// or a 422 (FastAPI's validation) is asked again without it, whatever the message says, since strict servers
+    /// word the refusal in their own way. That shows as `.adapted(.usageNotRequested)` before the retried stream, and
+    /// only when the retry gets through. A retry that fails too throws its own error, the one the request would have
+    /// had without this feature. Pass false for a host that already refused.
     public func stream(
         model: String,
         messages: [ChatMessage],
@@ -99,17 +101,23 @@ public struct ChatClient: Sendable {
             let task = Task {
                 do {
                     var includeUsage = includeUsage
+                    var adaptation: Adaptation?
                     while true {
                         // Built here, off the caller's thread, because it reads and encodes every photo in the chat.
                         let request = try client.chatRequest(model: model, messages: messages, reasoningEffort: reasoningEffort,
                                                              images: images, tools: tools, includeUsage: includeUsage)
                         do {
-                            try await client.read(request, purpose: purpose, into: continuation)
+                            try await client.read(request, purpose: purpose) { event in
+                                if let pending = adaptation {
+                                    adaptation = nil
+                                    continuation.yield(.adapted(pending))
+                                }
+                                continuation.yield(event)
+                            }
                             break
-                        } catch ChatClientError.http(let status, let message)
-                            where includeUsage && [400, 422].contains(status) && Self.namesStreamOptions(message) {
+                        } catch ChatClientError.http(let status, _) where includeUsage && [400, 422].contains(status) {
                             includeUsage = false
-                            continuation.yield(.adapted(.usageNotRequested))
+                            adaptation = .usageNotRequested
                         }
                     }
                     continuation.finish()
@@ -121,14 +129,14 @@ public struct ChatClient: Sendable {
         }
     }
 
-    private static func namesStreamOptions(_ message: String) -> Bool {
-        let text = message.lowercased()
-        return text.contains("stream_options") || text.contains("stream options")
-    }
+    /// How long a stream that has finished is given to say anything more, such as its token counts, before it is
+    /// taken as over. Servers that hold the connection open after the finish reason would otherwise hold the reply.
+    static let finishGrace: Duration = .seconds(2)
 
-    /// Reads to the end of the stream, `[DONE]` included, since token counts follow the finish reason.
+    /// Reads a reply until `[DONE]`, the token counts that follow the finish reason, the end of the connection, or
+    /// `finishGrace` after the finish reason, whichever comes first.
     private func read(_ request: URLRequest, purpose: Exchange.Purpose,
-                      into continuation: AsyncThrowingStream<StreamEvent, Error>.Continuation) async throws {
+                      emit: (StreamEvent) -> Void) async throws {
         try await captured(request, purpose: purpose) { exchange in
             var body = BodyCapture()
             defer { exchange.store(body) }
@@ -146,6 +154,22 @@ public struct ChatClient: Sendable {
                 throw Self.httpError(status: http.statusCode, body: failure)
             }
 
+            // The bytes pass through a stream so that the grace period can end the reading while it waits for one.
+            let (relay, feed) = AsyncThrowingStream.makeStream(of: UInt8.self, throwing: Error.self)
+            let pump = Task {
+                do {
+                    for try await byte in bytes { feed.yield(byte) }
+                    feed.finish()
+                } catch {
+                    feed.finish(throwing: error)
+                }
+            }
+            var grace: Task<Void, Never>?
+            defer {
+                pump.cancel()
+                grace?.cancel()
+            }
+
             let decoder = SSEDecoder()
             var splitter = ThinkTagSplitter()
             var lines = LineBuffer()
@@ -153,42 +177,54 @@ public struct ChatClient: Sendable {
             var ended = false
 
             func handle(_ line: String) throws {
-                for event in try decoder.decode(line: line) {
+                let events: [StreamEvent]
+                do {
+                    events = try decoder.decode(line: line)
+                } catch where finished {
+                    return
+                }
+                for event in events {
                     switch event {
                     case .content(let text):
                         guard !finished else { continue }
                         exchange.firstTokenAt = exchange.firstTokenAt ?? Date()
-                        splitter.push(text).forEach { continuation.yield($0) }
+                        splitter.push(text).forEach(emit)
                     case .reasoning, .toolCall:
                         guard !finished else { continue }
                         exchange.firstTokenAt = exchange.firstTokenAt ?? Date()
-                        continuation.yield(event)
+                        emit(event)
                     case .usage(let usage):
                         exchange.usage = usage
-                        continuation.yield(event)
+                        emit(event)
+                        ended = ended || finished
                     case .done(let reason):
                         if !finished {
-                            splitter.flush().forEach { continuation.yield($0) }
-                            continuation.yield(event)
+                            splitter.flush().forEach(emit)
+                            emit(event)
                             finished = true
+                            grace = Task {
+                                try? await Task.sleep(for: Self.finishGrace)
+                                feed.finish()
+                            }
                         }
-                        ended = reason == nil
+                        ended = ended || reason == nil
                     case .adapted:
                         break
                     }
                 }
             }
 
-            for try await byte in bytes {
+            for try await byte in relay {
                 body.append(byte)
                 guard let line = lines.push(byte) else { continue }
                 try handle(line)
                 if ended { break }
             }
+            try Task.checkCancellation()
             if !ended, let line = lines.flush() { try handle(line) }
             if !finished {
-                splitter.flush().forEach { continuation.yield($0) }
-                continuation.yield(.done(finishReason: nil))
+                splitter.flush().forEach(emit)
+                emit(.done(finishReason: nil))
             }
         }
     }

@@ -31,6 +31,14 @@ struct ExchangeCurlTests {
             """#)
     }
 
+    @Test func theBodyIsTakenFromPlaceholdersAlreadyReadNotReadAgain() {
+        let exchange = chat(body: #"{"model":"m"}"#)
+        #expect(exchange.curl(using: exchange.placeholders) == exchange.curl)
+        let given = ImagePlaceholders(body: bytes(#"{"given":true}"#), contentType: "application/json")
+        let command = exchange.curl(using: given)
+        #expect(command.contains(#""given": true"#) && !command.contains(#""model""#))
+    }
+
     @Test func aGetHasNoMethodOrBody() {
         let exchange = Exchange(purpose: .models, method: "GET", url: URL(string: "http://localhost:8099/v1/models")!,
                                 requestHeaders: [.init(name: "Authorization", value: "Bearer $API_KEY")])

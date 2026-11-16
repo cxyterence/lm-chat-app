@@ -57,8 +57,9 @@ struct CapabilityCheckTests {
         #expect(rig.store.selectedConversation?.messages.last?.adaptations == [.reasoningOffForTools])
     }
 
-    @Test func aModelWithoutToolsIsRememberedSoNoRequestCarriesThem() async throws {
-        let stub = server { _ in (400, Self.noTools) }
+    @Test func aReportThatSaysNoDoesNotSwitchToolsOffSinceOneTokenRequestIsWeakEvidence() async throws {
+        let stub = StubServer { _ in (200, sse(["ok"])) }
+        stub.probe = { body in body["tools"] != nil ? (400, Self.noTools) : (200, "{}") }
         addGetMe(to: stub)
         let rig = Rig(server: stub)
         defer { rig.cleanup() }
@@ -66,13 +67,12 @@ struct CapabilityCheckTests {
 
         await rig.store.checkCapabilities(of: rig.connection.id)
         let report = try finished(rig.store.capabilityChecks[key(rig)])
-        #expect(report.tools == .no(reason: "this model does not support tools"))
+        #expect(report.tools == .no(reason: "this model does not support tools"), "the report still says so")
 
         rig.store.send("hi")
         await untilIdle(rig.store)
-        let sent = try #require(stub.chats.first)
-        #expect(stub.chats.count == 1 && offeredTools(sent).isEmpty)
-        #expect(rig.store.selectedConversation?.messages.last?.adaptations == [.toolsDropped(reason: "this model does not support tools")])
+        #expect(offeredTools(try #require(stub.chats.first)) == ["get_me"], "a real request is still the judge")
+        #expect(rig.store.selectedConversation?.messages.last?.adaptations == [])
     }
 
     @Test func aModelThatTakesToolsChangesNothing() async throws {

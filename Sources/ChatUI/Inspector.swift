@@ -174,23 +174,32 @@ struct ExchangeDetail: View {
         let text: String
     }
 
+    /// An edit on its way to the server. The send is a task of the view, so it stops when the view goes.
+    private struct Resend: Equatable {
+        let id = UUID()
+        let text: String
+    }
+
     let store: ChatStore
     let exchange: Exchange
     let messageID: UUID
     /// Opens the request that a resend produced.
     let show: (UUID) -> Void
     @State private var part: Part
-    /// The request text, read off the main actor because a body with photos is large.
+    /// The request text and the curl command, read off the main actor because a body with photos is large.
     @State private var request: ImagePlaceholders?
+    @State private var curl: String?
     @State private var requestHeadersOpen = true
     @State private var responseHeadersOpen = false
     @State private var draft: Draft?
+    @State private var resend: Resend?
     @State private var sending = false
     @State private var copied: String?
     @State private var copies = 0
     @Environment(\.palette) private var palette
 
-    /// `request` is the request text when it is already at hand. Otherwise it is read as the page opens.
+    /// `request` is the request text when it is already at hand, which also reads the curl command now. Otherwise
+    /// both are read, off the main actor, as the page opens.
     init(store: ChatStore, exchange: Exchange, messageID: UUID, part: Part = .request, request: ImagePlaceholders? = nil,
          show: @escaping (UUID) -> Void) {
         self.store = store
@@ -199,6 +208,7 @@ struct ExchangeDetail: View {
         self.show = show
         _part = State(initialValue: part)
         _request = State(initialValue: request)
+        _curl = State(initialValue: request.map(exchange.curl(using:)))
     }
 
     var body: some View {
@@ -221,19 +231,24 @@ struct ExchangeDetail: View {
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .task(id: exchange.id) {
-            guard request == nil else { return }
+            guard curl == nil else { return }
             let target = exchange
-            request = await Task.detached { target.placeholders }.value
+            (request, curl) = await Task.detached {
+                let placeholders = target.placeholders
+                return (placeholders, target.curl(using: placeholders))
+            }.value
+        }
+        .task(id: resend) {
+            guard let resend else { return }
+            sending = true
+            let sent = await store.resend(exchange, editedText: resend.text, for: messageID)
+            sending = false
+            if !Task.isCancelled { show(sent.id) }
         }
         .sheet(item: $draft) { draft in
             ResendEditor(text: draft.text, cancel: { self.draft = nil }) { edited in
                 self.draft = nil
-                sending = true
-                Task {
-                    let sent = await store.resend(exchange, editedText: edited, for: messageID)
-                    sending = false
-                    show(sent.id)
-                }
+                resend = Resend(text: edited)
             }
             .theme(store.theme)
         }
@@ -303,25 +318,30 @@ struct ExchangeDetail: View {
             }
             .disabled(copyText == nil)
             .accessibilityLabel(part == .request ? "Copy request" : "Copy response")
-            Button { copy(exchange.curl, as: "curl") } label: {
+            Button { copy(curl, as: "curl") } label: {
                 Label(copied == "curl" ? "Copied" : "Copy as curl", systemImage: copied == "curl" ? "checkmark" : "terminal")
             }
-            Button { if let request { draft = Draft(text: request.text) } } label: {
-                if sending {
-                    HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Sending…") }
-                } else {
-                    Label("Edit and Resend", systemImage: "square.and.pencil")
+            .disabled(curl == nil)
+            if exchange.isEditable {
+                Button { if let request { draft = Draft(text: request.text) } } label: {
+                    if sending {
+                        HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Sending…") }
+                    } else {
+                        Label("Edit and Resend", systemImage: "square.and.pencil")
+                    }
                 }
+                .disabled(request == nil || sending)
             }
-            .disabled(request == nil || sending)
         }
         return ViewThatFits(in: .horizontal) {
             full.labelStyle(.titleOnly)
             Menu {
                 Button("Copy", systemImage: "doc.on.doc") { copy(copyText, as: "Copy") }.disabled(copyText == nil)
-                Button("Copy as curl", systemImage: "terminal") { copy(exchange.curl, as: "curl") }
-                Button("Edit and Resend", systemImage: "square.and.pencil") { if let request { draft = Draft(text: request.text) } }
-                    .disabled(request == nil || sending)
+                Button("Copy as curl", systemImage: "terminal") { copy(curl, as: "curl") }.disabled(curl == nil)
+                if exchange.isEditable {
+                    Button("Edit and Resend", systemImage: "square.and.pencil") { if let request { draft = Draft(text: request.text) } }
+                        .disabled(request == nil || sending)
+                }
             } label: {
                 Label("Actions", systemImage: "ellipsis.circle").frame(maxWidth: .infinity)
             }

@@ -50,9 +50,9 @@ final class StubServer: @unchecked Sendable {
     }
 
     var bodies: [[String: Any]] { lock.withLock { received } }
-    private var raw: [(path: String, contentType: String?, body: Data)] = []
+    private var raw: [(path: String, method: String?, contentType: String?, body: Data)] = []
     /// Every request as sent, oldest first.
-    var requests: [(path: String, contentType: String?, body: Data)] { lock.withLock { raw } }
+    var requests: [(path: String, method: String?, contentType: String?, body: Data)] { lock.withLock { raw } }
 
     var client: ChatClient { makeClient(apiKey: "") }
 
@@ -63,7 +63,7 @@ final class StubServer: @unchecked Sendable {
                           session: URLSession(configuration: configuration), record: record)
     }
 
-    fileprivate func handle(_ body: [String: Any], raw request: (path: String, contentType: String?, body: Data)) -> Reply {
+    fileprivate func handle(_ body: [String: Any], raw request: (path: String, method: String?, contentType: String?, body: Data)) -> Reply {
         lock.withLock { received.append(body); raw.append(request) }
         return respond(request.path, body)
     }
@@ -104,7 +104,7 @@ final class StubProtocol: URLProtocol {
         let server = Self.lock.withLock { Self.servers[request.url?.host ?? ""] }!
         let body = Self.body(of: request) ?? Data()
         let reply = server.handle(jsonObject(body) ?? [:],
-                                  raw: (request.url?.path ?? "", request.value(forHTTPHeaderField: "Content-Type"), body))
+                                  raw: (request.url?.path ?? "", request.httpMethod, request.value(forHTTPHeaderField: "Content-Type"), body))
         let response = HTTPURLResponse(url: request.url!, statusCode: max(reply.status, 200), httpVersion: "HTTP/1.1",
                                        headerFields: ["Content-Type": "text/event-stream"])!
         if reply.status == 0 {

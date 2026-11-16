@@ -146,6 +146,16 @@ struct ExchangeCaptureTests {
         #expect(exchange.responseBody == String(repeating: "€", count: Exchange.bodyLimit / 3))
     }
 
+    @Test func aSessionCookieTheServerSetsIsNotKept() {
+        let response = HTTPURLResponse(url: URL(string: "http://h/x")!, statusCode: 200, httpVersion: "HTTP/1.1",
+                                       headerFields: ["Set-Cookie": "session=s3cr3t; Path=/; HttpOnly", "Content-Type": "text/plain"])!
+        var exchange = Exchange(purpose: .chat, url: response.url!)
+        exchange.receive(response)
+        #expect(exchange.responseHeaders == [.init(name: "Content-Type", value: "text/plain"),
+                                             .init(name: "Set-Cookie", value: "<redacted>")])
+        #expect(!"\(exchange)".contains("s3cr3t"))
+    }
+
     @Test func aResponseThatIsNotTextIsNamedNotShown() {
         let body = BodyCapture(whole: Data([0xFF, 0xFE, 0x00, 0x81]))
         var exchange = Exchange(purpose: .image, url: URL(string: "http://h/x")!)

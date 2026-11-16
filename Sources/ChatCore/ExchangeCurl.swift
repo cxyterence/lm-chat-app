@@ -3,8 +3,11 @@ import Foundation
 extension Exchange {
     /// A `curl` command that repeats the request. The key is `$API_KEY`, so set it first. Photos can't be
     /// repeated from here, so a request that held some starts with a comment saying where they go.
-    public var curl: String {
-        let placeholders = placeholders
+    public var curl: String { curl(using: placeholders) }
+
+    /// The same, from `placeholders` already read from this request. Reading them decodes the whole body, which holds
+    /// megabytes when there are photos, so a view that has them should not make this read them again.
+    public func curl(using placeholders: ImagePlaceholders) -> String {
         let form = ImagePlaceholders.boundary(in: requestHeader("Content-Type")).flatMap { MultipartBody(requestBody, boundary: $0) }
 
         var words = ["curl" + (requestHeader("Accept") == "text/event-stream" ? " -N" : "")

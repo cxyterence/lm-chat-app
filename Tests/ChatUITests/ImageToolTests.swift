@@ -294,7 +294,7 @@ struct ImageToolTests {
         await untilIdle(store)
 
         #expect(messages(store).last?.content == "plain answer")
-        #expect(chat.chats.map { offeredTools($0).isEmpty } == [false, true, true])
+        #expect(chat.asked.map { offeredTools($0).isEmpty } == [false, true, true])
     }
 
     private nonisolated static let reasoningRefusal = #"{"error":{"message":"Function tools with reasoning_effort are not supported for gpt-6-luna in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'.","type":"invalid_request_error"}}"#
@@ -324,9 +324,9 @@ struct ImageToolTests {
         #expect(images.drawn.count == 1)
         #expect(messages(store).first { !$0.toolCalls.isEmpty }?.images.count == 1)
         #expect(store.failureMessage(for: try #require(store.selection)) == nil)
-        let retry = try #require(chat.chats.dropFirst().first)
+        let retry = try #require(chat.asked.dropFirst().first)
         #expect(offeredTools(retry) == ["generate_image"] && retry["reasoning_effort"] as? String == "none")
-        #expect(chat.chats.dropFirst().allSatisfy { $0["reasoning_effort"] as? String == "none" && !offeredTools($0).isEmpty })
+        #expect(chat.asked.dropFirst().allSatisfy { $0["reasoning_effort"] as? String == "none" && !offeredTools($0).isEmpty })
     }
 
     @Test func onceAModelNeedsReasoningOffLaterRepliesSendItStraightAway() async throws {
@@ -360,8 +360,8 @@ struct ImageToolTests {
         await untilIdle(store)
 
         #expect(messages(store).last?.content == "plain answer")
-        #expect(chat.chats.map { offeredTools($0).isEmpty } == [false, true])
-        #expect(chat.chats.last?["reasoning_effort"] as? String == "low", "no tools, so the chosen effort stands")
+        #expect(chat.asked.map { offeredTools($0).isEmpty } == [false, true])
+        #expect(chat.asked.last?["reasoning_effort"] as? String == "low", "no tools, so the chosen effort stands")
     }
 
     @Test func imageModelsAreNotOfferedAsChatModelsAndASavedOneFallsBack() async throws {

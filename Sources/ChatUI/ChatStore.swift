@@ -121,7 +121,7 @@ public final class ChatStore {
     @ObservationIgnored private var toolless: [String: String] = [:]
     /// Models whose server takes tools only with reasoning off, as OpenAI's gpt-6-luna does.
     @ObservationIgnored private var toolsNeedNoReasoning: Set<String> = []
-    /// Hosts that refused `stream_options`, so their requests don't ask for token counts.
+    /// Servers (host and port) that refused `stream_options`, so their requests don't ask for token counts.
     @ObservationIgnored private var withoutUsage: Set<String> = []
 
     public convenience init() {
@@ -602,7 +602,7 @@ public final class ChatStore {
         let body = await Task.detached { exchange.placeholders.restore(editedText) }.value
         let client = ChatClient(config: resendConfig(for: exchange), session: session)
         let result = await client.send(rawBody: body, to: exchange.url,
-                                       contentType: exchange.requestHeader("Content-Type") ?? "application/json")
+                                       contentType: exchange.requestHeader("Content-Type") ?? "application/json", method: exchange.method)
         attach(result, to: messageID)
         return result
     }
@@ -619,8 +619,9 @@ public final class ChatStore {
         return ServerConfig(baseURL: connection.baseURL, apiKey: apiKeys[connection.id])
     }
 
-    /// Asks a connection's selected model what it supports. When that is the active connection's model, what the
-    /// report finds about tools is remembered, so the first real request doesn't have to fail to learn it.
+    /// Asks a connection's selected model what it supports. When that is the active connection's model, a report
+    /// that tools need reasoning off is remembered, since a second probe confirms it. A "no" is only shown: one
+    /// token request is weak evidence, so a real request still decides whether tools are dropped.
     func checkCapabilities(of connectionID: UUID) async {
         guard let connection = connections.first(where: { $0.id == connectionID }), !connection.model.isEmpty else { return }
         let key = CapabilityKey(connection: connectionID, model: connection.model)
@@ -633,8 +634,7 @@ public final class ChatStore {
             if connectionID == activeConnectionID, connection.model == model {
                 switch report.tools {
                 case .onlyWithReasoningOff: toolsNeedNoReasoning.insert(model)
-                case .no(let reason): toolless[model] = ExchangeText.shortened(reason)
-                case .yes, .unknown: break
+                case .yes, .no, .unknown: break
                 }
             }
         } catch {
@@ -767,12 +767,12 @@ public final class ChatStore {
                              request: Request) async throws -> [ToolCall] {
         var calls = ToolCallAccumulator()
         let servers = Dictionary(tools.map { ($0.name, $0.serverName) }, uniquingKeysWith: { first, _ in first })
-        let host = client.config.baseURL.host() ?? ""
+        let server = "\(client.config.baseURL.host() ?? ""):\(client.config.baseURL.port ?? 0)"
         do {
             for try await event in client.stream(model: model, messages: wire, reasoningEffort: effort, images: images,
-                                                 tools: tools.map(\.spec), includeUsage: !withoutUsage.contains(host)) {
+                                                 tools: tools.map(\.spec), includeUsage: !withoutUsage.contains(server)) {
                 if case .adapted(let adaptation) = event {
-                    if adaptation == .usageNotRequested { withoutUsage.insert(host) }
+                    if adaptation == .usageNotRequested { withoutUsage.insert(server) }
                     adapt(adaptation, on: messageID)
                 }
                 guard let reply = liveReply, reply.messageID == messageID else { continue }

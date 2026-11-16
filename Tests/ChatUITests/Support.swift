@@ -54,6 +54,7 @@ final class StubServer: @unchecked Sendable {
     private let lock = NSLock()
     private var received: [[String: Any]] = []
     private var queries: [String] = []
+    private var named: [[String: Any]] = []
 
     /// `search` answers Serper's /search with the query it was sent.
     init(search: @escaping @Sendable (String) -> Reply = { _ in (404, "") },
@@ -64,17 +65,22 @@ final class StubServer: @unchecked Sendable {
     }
 
     var searches: [String] { lock.withLock { queries } }
+    /// Bodies of the requests that name a chat, oldest first.
+    var titles: [[String: Any]] { lock.withLock { named } }
     /// The body of GET /v1/models when set. Otherwise the model list is a 404.
     nonisolated(unsafe) var models: String?
     /// Answers POST /v1/images/generations when set.
     nonisolated(unsafe) var image: (@Sendable ([String: Any]) -> Reply)?
     private var drawings: [[String: Any]] = []
     private var credentials: [(path: String, authorization: String?)] = []
+    private var verbs: [String] = []
     private var edits: [Data] = []
     /// Raw multipart bodies of POST /v1/images/edits, answered by `image`.
     var edited: [Data] { lock.withLock { edits } }
     /// Bodies of image requests, oldest first.
     var drawn: [[String: Any]] { lock.withLock { drawings } }
+    /// The HTTP method of each request, oldest first.
+    var methods: [String] { lock.withLock { verbs } }
     /// The Authorization header each request carried, oldest first.
     var authorizations: [(path: String, authorization: String?)] { lock.withLock { credentials } }
     /// Answers requests to /mcp when set.
@@ -87,6 +93,9 @@ final class StubServer: @unchecked Sendable {
 
     /// Bodies of streamed chat requests, oldest first. Title requests are answered "Stub Title" and left out.
     var chats: [[String: Any]] { lock.withLock { received } }
+    /// The chat requests the app chose to make. A server that refuses a request carrying `stream_options` is also
+    /// sent it bare, so a refusal costs one more request, and `chats` has that repeat too.
+    var asked: [[String: Any]] { chats.filter { $0["stream_options"] != nil } }
 
     var session: URLSession {
         let configuration = URLSessionConfiguration.ephemeral
@@ -96,8 +105,11 @@ final class StubServer: @unchecked Sendable {
 
     var baseURL: URL { URL(string: "http://\(host)/v1")! }
 
-    fileprivate func handle(path: String, authorization: String?, body: [String: Any], raw: Data) -> Reply {
-        lock.withLock { credentials.append((path, authorization)) }
+    fileprivate func handle(path: String, method: String?, authorization: String?, body: [String: Any], raw: Data) -> Reply {
+        lock.withLock {
+            credentials.append((path, authorization))
+            verbs.append(method ?? "")
+        }
         if path == "/search" {
             let query = body["q"] as? String ?? ""
             lock.withLock { queries.append(query) }
@@ -115,7 +127,10 @@ final class StubServer: @unchecked Sendable {
             return image([:])
         }
         guard path.hasSuffix("chat/completions"), body["stream"] as? Bool == true else { return (404, "") }
-        if transcript(body).first?.text.hasPrefix("You name chat conversations") == true { return (200, sse(["Stub Title"])) }
+        if transcript(body).first?.text.hasPrefix("You name chat conversations") == true {
+            lock.withLock { named.append(body) }
+            return (200, sse(["Stub Title"]))
+        }
         lock.withLock { received.append(body) }
         return respond(body)
     }
@@ -171,7 +186,7 @@ final class StubProtocol: URLProtocol {
             client?.urlProtocolDidFinishLoading(self)
             return
         }
-        let reply = server.handle(path: request.url?.path ?? "", authorization: request.value(forHTTPHeaderField: "Authorization"),
+        let reply = server.handle(path: request.url?.path ?? "", method: request.httpMethod, authorization: request.value(forHTTPHeaderField: "Authorization"),
                                   body: body ?? [:], raw: raw)
         let response = HTTPURLResponse(url: request.url!, statusCode: reply.status, httpVersion: "HTTP/1.1",
                                        headerFields: ["Content-Type": "text/event-stream"])!

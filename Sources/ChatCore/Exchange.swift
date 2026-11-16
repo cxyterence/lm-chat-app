@@ -44,6 +44,7 @@ public struct Exchange: Identifiable, Sendable, Equatable {
     /// `error` of a request that was stopped.
     public static let cancelledMessage = "Cancelled"
     static let redactedAuthorization = "Bearer $API_KEY"
+    static let redactedCookie = "<redacted>"
 
     public var id: UUID
     public var purpose: Purpose
@@ -103,6 +104,9 @@ public struct Exchange: Identifiable, Sendable, Equatable {
         self.usage = usage
     }
 
+    /// A request with nothing in its body, such as a GET, has nothing to edit and resend.
+    public var isEditable: Bool { !requestBody.isEmpty }
+
     public func requestHeader(_ name: String) -> String? {
         requestHeaders.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }?.value
     }
@@ -134,7 +138,10 @@ extension Exchange {
 
     mutating func receive(_ response: HTTPURLResponse) {
         status = response.statusCode
-        responseHeaders = Self.sorted(response.allHeaderFields.map { Header(name: "\($0.key)", value: "\($0.value)") })
+        responseHeaders = Self.sorted(response.allHeaderFields.map { field in
+            let name = "\(field.key)"
+            return Header(name: name, value: name.caseInsensitiveCompare("Set-Cookie") == .orderedSame ? Self.redactedCookie : "\(field.value)")
+        })
     }
 
     mutating func store(_ body: BodyCapture) {

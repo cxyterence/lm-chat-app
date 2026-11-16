@@ -66,9 +66,10 @@ struct StreamUsageTests {
         #expect(recorder.exchanges.allSatisfy { $0.purpose == .chat })
     }
 
-    @Test func aTitleSurvivesTheSameRefusal() async throws {
+    @Test func aTitleNeverAsksForTokenCountsSoTheRefusalDoesNotComeUp() async throws {
         let server = StubServer { $0["stream_options"] == nil ? (200, sse(["A fine title"])) : self.refusal }
         #expect(try await server.client.title(model: "m", for: "hello") == "A fine title")
+        #expect(server.bodies.count == 1 && server.bodies.allSatisfy { $0["stream_options"] == nil })
     }
 
     @Test func aHostKnownToRefuseIsNotAskedAtAll() async throws {
@@ -78,12 +79,29 @@ struct StreamUsageTests {
         #expect(server.bodies.first?["stream_options"] == nil)
     }
 
-    @Test func aRefusalForAnotherReasonIsNotRetried() async throws {
-        let server = StubServer { _ in (400, #"{"error":{"message":"tools are not supported"}}"#) }
-        await #expect(throws: ChatClientError.http(status: 400, message: "tools are not supported")) {
-            try await events(server.client.stream(model: "m", messages: hello))
+    @Test(arguments: [
+        (400, #"{"error":{"message":"Invalid request: unknown parameter"}}"#),
+        (400, "Bad Request"),
+        (422, #"{"detail":"Unprocessable Entity"}"#),
+    ])
+    func aServerThatRefusesWithoutNamingTheFieldIsAskedAgainWithoutItToo(status: Int, message: String) async throws {
+        let server = StubServer { $0["stream_options"] == nil ? (200, sse(["Hi"])) : (status, message) }
+        let received = try await events(server.client.stream(model: "m", messages: hello))
+        #expect(received == [.adapted(.usageNotRequested), .content("Hi"), .done(finishReason: nil)])
+        #expect(server.bodies.map { $0["stream_options"] != nil } == [true, false])
+    }
+
+    @Test func aRefusalForAnotherReasonThrowsTheRetrysErrorAndSaysNothingAboutTokenCounts() async throws {
+        let server = StubServer { body in
+            body["stream_options"] != nil ? (400, #"{"error":{"message":"Bad Request"}}"#)
+                                          : (400, #"{"error":{"message":"tools are not supported"}}"#)
         }
-        #expect(server.bodies.count == 1)
+        var received: [StreamEvent] = []
+        await #expect(throws: ChatClientError.http(status: 400, message: "tools are not supported")) {
+            for try await event in server.client.stream(model: "m", messages: hello) { received.append(event) }
+        }
+        #expect(received.isEmpty, "no usage note for a request that failed for its own reason")
+        #expect(server.bodies.map { $0["stream_options"] != nil } == [true, false])
     }
 
     @Test func theRetryHappensOnce() async throws {

@@ -58,6 +58,35 @@ struct RawSendTests {
         #expect(exchange.requestHeader("Content-Type") == type)
     }
 
+    @Test(arguments: ["PUT", "PATCH", "DELETE"])
+    func goesWithTheMethodItWasGiven(method: String) async throws {
+        let server = StubServer { _ in (200, "{}") }
+        let exchange = await server.client.send(rawBody: edited, to: chatURL(server), contentType: "application/json", method: method)
+        #expect(server.requests.map(\.method) == [method])
+        #expect(exchange.method == method)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func aSendThatIsCancelledStopsAndReportsItself() async throws {
+        let server = StubServer(holdsOpen: true) { _ in (200, "partial") }
+        let recorder = Recorder()
+        let client = server.makeClient(apiKey: "", record: recorder.sink)
+        let url = chatURL(server), body = edited
+        let sending = Task { await client.send(rawBody: body, to: url, contentType: "application/json") }
+        for _ in 0..<500 where server.requests.isEmpty { try? await Task.sleep(for: .milliseconds(10)) }
+        sending.cancel()
+
+        let exchange = await sending.value
+        #expect(exchange.error == Exchange.cancelledMessage)
+        #expect(exchange.finishedAt != nil)
+    }
+
+    @Test func aRequestWithoutABodyHasNothingToEdit() {
+        let url = URL(string: "http://h/v1/models")!
+        #expect(!Exchange(purpose: .models, method: "GET", url: url).isEditable)
+        #expect(Exchange(purpose: .chat, url: url, requestBody: edited).isEditable)
+    }
+
     @Test func theKeyGoesOnlyToTheConnectionsOwnHost() async throws {
         let mine = StubServer { _ in (200, "{}") }, other = StubServer { _ in (200, "{}") }
         let exchange = await mine.makeClient(apiKey: Self.key).send(rawBody: edited, to: chatURL(other), contentType: "application/json")

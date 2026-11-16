@@ -134,6 +134,22 @@ struct CapabilityTests {
         #expect(report.contextLength == nil)
     }
 
+    @Test func serverInfoLeavesOutWhatNamesACredentialAndAnyValueThatHoldsTheKey() async throws {
+        let info = """
+            {"version":"0.5.1","authorization":"Basic abc","x_bearer_hint":"b","credentials_file":"/c","cookie_name":"sid",
+             "launch":"python -m sglang --api-key \(Self.key) --port 30000","safe":"ok","short":"abc"}
+            """
+        let server = StubServer(route: { path, body in
+            path.hasSuffix("/server_info") ? (200, info) : path.hasSuffix("/models") ? (404, "{}") : Self.plain(body)
+        })
+        let report = try await server.makeClient(apiKey: Self.key).capabilities(model: "m")
+        #expect(report.server == [Fact(name: "safe", value: "ok"), Fact(name: "short", value: "abc"), Fact(name: "version", value: "0.5.1")])
+
+        let shortKey = try await server.makeClient(apiKey: "abc").capabilities(model: "m")
+        #expect(!shortKey.server.contains { $0.name == "short" }, "a value equal to even a short key is left out")
+        #expect(shortKey.server.contains { $0.name == "safe" } && shortKey.server.contains { $0.name == "version" })
+    }
+
     @Test func contextLengthIsReadFromTheKeysServersUse() async throws {
         let entries = [
             (#"{"id":"m","max_model_len":8192}"#, 8192),
