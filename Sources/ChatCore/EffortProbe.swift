@@ -23,7 +23,8 @@ extension ChatClient {
         case 200..<300: return true
         case 400, 422:
             // vLLM's Responses endpoint names the field `body.reasoning.effort`.
-            return !reply.text.lowercased().contains("effort")
+            let text = reply.text.lowercased()
+            return !["reasoning_effort", "reasoning effort", "reasoning.effort"].contains(where: text.contains)
         default: throw reply.error
         }
     }

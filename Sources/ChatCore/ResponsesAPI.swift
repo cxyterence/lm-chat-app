@@ -115,9 +115,10 @@ struct WireResponsesEvent: Decodable {
         let type: String?
         let callID: String?
         let name: String?
+        let arguments: String?
 
         enum CodingKeys: String, CodingKey {
-            case type, name
+            case type, name, arguments
             case callID = "call_id"
         }
     }
@@ -164,12 +165,15 @@ struct WireResponsesEvent: Decodable {
     let outputIndex: Int?
     let item: Item?
     let response: Response?
+    /// The whole arguments of a call, on `response.function_call_arguments.done`.
+    let arguments: String?
+    let name: String?
     /// OpenAI's `error` event carries the message here, other servers inside `error`.
     let message: String?
     let error: Failure?
 
     enum CodingKeys: String, CodingKey {
-        case type, delta, item, response, message, error
+        case type, delta, item, response, message, error, arguments, name
         case outputIndex = "output_index"
     }
 
@@ -180,6 +184,8 @@ struct WireResponsesEvent: Decodable {
         outputIndex = try? c.decodeIfPresent(Int.self, forKey: .outputIndex)
         item = try? c.decodeIfPresent(Item.self, forKey: .item)
         response = try? c.decodeIfPresent(Response.self, forKey: .response)
+        arguments = try? c.decodeIfPresent(String.self, forKey: .arguments)
+        name = try? c.decodeIfPresent(String.self, forKey: .name)
         message = try? c.decodeIfPresent(String.self, forKey: .message)
         error = try? c.decodeIfPresent(Failure.self, forKey: .error)
     }
@@ -187,8 +193,23 @@ struct WireResponsesEvent: Decodable {
 
 /// Reads the Responses API's server-sent events into the same `StreamEvent`s chat completions gives.
 /// Events it has no use for, such as `response.created` or an event type from a newer API, are ignored.
-struct ResponsesDecoder {
+/// One decoder reads one reply, since it remembers which calls it has already been given arguments for.
+final class ResponsesDecoder {
     private let jsonDecoder = JSONDecoder()
+    /// The output indexes of calls that have begun, and of those that have had their arguments.
+    private var begun: Set<Int> = []
+    private var argued: Set<Int> = []
+
+    /// A server may send a call's arguments as deltas, whole inside the item or whole in the arguments-done event,
+    /// and some send them more than once. They count the first time only.
+    private func call(index: Int?, id: String?, name: String?, arguments: String?) -> [StreamEvent] {
+        let key = index ?? -1
+        let begins = begun.insert(key).inserted
+        let text = argued.contains(key) ? "" : arguments ?? ""
+        if !text.isEmpty { argued.insert(key) }
+        guard begins || !text.isEmpty else { return [] }
+        return [.toolCall(ToolCallDelta(index: index, id: begins ? id : nil, name: begins ? name : nil, arguments: text))]
+    }
 
     func decode(line: String) throws -> [StreamEvent] {
         guard line.hasPrefix("data:") else { return [] }
@@ -203,22 +224,20 @@ struct ResponsesDecoder {
             return event.delta.flatMap { $0.isEmpty ? nil : [.content($0)] } ?? []
         case "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
             return event.delta.flatMap { $0.isEmpty ? nil : [.reasoning($0)] } ?? []
-        case "response.output_item.added":
+        case "response.output_item.added", "response.output_item.done":
             guard let item = event.item, item.type == "function_call" else { return [] }
-            return [.toolCall(ToolCallDelta(index: event.outputIndex, id: item.callID, name: item.name, arguments: ""))]
+            return call(index: event.outputIndex, id: item.callID, name: item.name, arguments: item.arguments)
         case "response.function_call_arguments.delta":
-            return event.delta.map { [.toolCall(ToolCallDelta(index: event.outputIndex, id: nil, name: nil, arguments: $0))] } ?? []
+            guard let delta = event.delta else { return [] }
+            argued.insert(event.outputIndex ?? -1)
+            return [.toolCall(ToolCallDelta(index: event.outputIndex, id: nil, name: nil, arguments: delta))]
+        case "response.function_call_arguments.done":
+            return call(index: event.outputIndex, id: nil, name: event.name, arguments: event.arguments)
         case "response.completed":
-            var events: [StreamEvent] = []
-            if let wire = event.response?.usage {
-                let usage = Usage(promptTokens: wire.inputTokens, completionTokens: wire.outputTokens,
-                                  reasoningTokens: wire.outputTokensDetails?.reasoningTokens)
-                if usage != Usage() { events.append(.usage(usage)) }
-            }
             let calls = event.response?.output?.contains { $0.type == "function_call" } == true
-            return events + [.done(finishReason: calls ? "tool_calls" : "stop")]
+            return usage(of: event) + [.done(finishReason: calls ? "tool_calls" : "stop")]
         case "response.incomplete":
-            return [.done(finishReason: "length")]
+            return usage(of: event) + [.done(finishReason: "length")]
         case "response.failed":
             throw ChatClientError.server(event.response?.error?.message ?? "The response failed.")
         case "error":
@@ -226,5 +245,12 @@ struct ResponsesDecoder {
         default:
             return []
         }
+    }
+
+    private func usage(of event: WireResponsesEvent) -> [StreamEvent] {
+        guard let wire = event.response?.usage else { return [] }
+        let usage = Usage(promptTokens: wire.inputTokens, completionTokens: wire.outputTokens,
+                          reasoningTokens: wire.outputTokensDetails?.reasoningTokens)
+        return usage == Usage() ? [] : [.usage(usage)]
     }
 }

@@ -122,6 +122,68 @@ struct ResponsesAPITests {
         #expect(calls.calls == [ToolCall(id: "call_86c03f762b3db7e5", name: "get_weather", arguments: #"{"city": "Paris"}"#)])
     }
 
+    /// The calls a stream of `lines` adds up to, read with a fresh decoder the way the client reads a reply.
+    private func calls(_ lines: [String]) throws -> [ToolCall] {
+        let fresh = ResponsesDecoder()
+        var calls = ToolCallAccumulator()
+        for line in lines { for case .toolCall(let delta) in try fresh.decode(line: "data: " + line) { calls.add(delta) } }
+        return calls.calls
+    }
+
+    private func expect(_ lines: [String], give expected: [ToolCall], sourceLocation: SourceLocation = #_sourceLocation) throws {
+        let got = try calls(lines)
+        #expect(got == expected, sourceLocation: sourceLocation)
+    }
+
+    private func added(_ index: Int, arguments: String? = nil) -> String {
+        item("added", index, arguments: arguments ?? "")
+    }
+
+    private func item(_ kind: String, _ index: Int, arguments: String) -> String {
+        let escaped = String(decoding: try! JSONEncoder().encode(arguments), as: UTF8.self)
+        return #"{"type":"response.output_item.\#(kind)","output_index":\#(index),"item":{"type":"function_call","call_id":"call_\#(index)","name":"get_weather","arguments":\#(escaped)}}"#
+    }
+
+    private func argumentsDone(_ index: Int, arguments: String) -> String {
+        let escaped = String(decoding: try! JSONEncoder().encode(arguments), as: UTF8.self)
+        return #"{"type":"response.function_call_arguments.done","output_index":\#(index),"arguments":\#(escaped),"name":"get_weather"}"#
+    }
+
+    private func delta(_ index: Int, _ text: String) -> String {
+        let escaped = String(decoding: try! JSONEncoder().encode(text), as: UTF8.self)
+        return #"{"type":"response.function_call_arguments.delta","output_index":\#(index),"delta":\#(escaped)}"#
+    }
+
+    @Test func argumentsThatCameWithTheCallAreNotLost() throws {
+        let whole = #"{"city":"Paris"}"#
+        try expect([added(0, arguments: whole), item("done", 0, arguments: whole)], give: [ToolCall(id: "call_0", name: "get_weather", arguments: whole)])
+    }
+
+    @Test func argumentsOnlyInTheArgumentsDoneEventAreUsed() throws {
+        let whole = #"{"city":"Paris"}"#
+        try expect([added(0), argumentsDone(0, arguments: whole), item("done", 0, arguments: whole)], give: [ToolCall(id: "call_0", name: "get_weather", arguments: whole)])
+    }
+
+    @Test func argumentsOnlyInTheItemDoneEventAreUsed() throws {
+        let whole = #"{"city":"Paris"}"#
+        try expect([added(0), item("done", 0, arguments: whole)], give: [ToolCall(id: "call_0", name: "get_weather", arguments: whole)])
+    }
+
+    @Test func aCallThatOnlyArrivesInItsDoneEventIsStillACall() throws {
+        let whole = #"{"city":"Paris"}"#
+        try expect([item("done", 0, arguments: whole)], give: [ToolCall(id: "call_0", name: "get_weather", arguments: whole)])
+    }
+
+    @Test func deltasFollowedByTheWholeArgumentsAreNotCountedTwice() throws {
+        let whole = #"{"city":"Paris"}"#
+        try expect([added(0), delta(0, #"{"city":"#), delta(0, #""Paris"}"#), argumentsDone(0, arguments: whole), item("done", 0, arguments: whole)], give: [ToolCall(id: "call_0", name: "get_weather", arguments: whole)])
+    }
+
+    @Test func eachCallIsJudgedOnItsOwnWhenOneStreamsAndTheOtherDoesNot() throws {
+        let one = #"{"city":"Paris"}"#, two = #"{"city":"Rome"}"#
+        try expect([added(0), added(1), delta(0, one), item("done", 0, arguments: one), item("done", 1, arguments: two)], give: [ToolCall(id: "call_0", name: "get_weather", arguments: one), ToolCall(id: "call_1", name: "get_weather", arguments: two)])
+    }
+
     @Test func aCapturedReasoningStreamBecomesReasoning() throws {
         #expect(try decode(CapturedResponses.reasoning) == [
             .reasoning("*"), .reasoning("   Instruction"), .reasoning(":"), .reasoning(" \""), .reasoning("Say"),
@@ -146,6 +208,11 @@ struct ResponsesAPITests {
     @Test func anIncompleteResponseFinishesAsCutOff() throws {
         let line = #"data: {"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"},"output":[]}}"#
         #expect(try decoder.decode(line: line) == [.done(finishReason: "length")])
+    }
+
+    @Test func anIncompleteResponseKeepsItsTokenCounts() throws {
+        let line = #"data: {"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":5,"output_tokens":40,"output_tokens_details":{"reasoning_tokens":31}}}}"#
+        #expect(try decoder.decode(line: line) == [.usage(Usage(promptTokens: 5, completionTokens: 40, reasoningTokens: 31)), .done(finishReason: "length")])
     }
 
     @Test func aFailedResponseThrowsTheServersMessage() {
