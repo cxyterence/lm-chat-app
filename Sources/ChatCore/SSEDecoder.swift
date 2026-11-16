@@ -4,6 +4,10 @@ public enum StreamEvent: Equatable, Sendable {
     case content(String)
     case reasoning(String)
     case toolCall(ToolCallDelta)
+    /// Token counts, from the final chunk of a stream that asked for them.
+    case usage(Usage)
+    /// Something the client changed about the request, such as retrying without `stream_options`.
+    case adapted(Adaptation)
     case done(finishReason: String?)
 }
 
@@ -58,6 +62,11 @@ struct SSEDecoder {
             if let reason = choice.finishReason {
                 events.append(.done(finishReason: reason))
             }
+        }
+        if let wire = chunk.usage {
+            let usage = Usage(promptTokens: wire.promptTokens, completionTokens: wire.completionTokens,
+                              reasoningTokens: wire.completionTokensDetails?.reasoningTokens)
+            if usage != Usage() { events.append(.usage(usage)) }
         }
         return events
     }

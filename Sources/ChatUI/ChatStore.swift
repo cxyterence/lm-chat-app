@@ -662,7 +662,7 @@ public final class ChatStore {
                     }
                 case .done("length") where request != .reply:
                     throw SummaryCutOff()
-                case .done: break
+                case .done, .usage, .adapted: break
                 }
             }
         } catch ChatClientError.http(400, let message) where !tools.isEmpty && liveReply?.content.isEmpty != false {

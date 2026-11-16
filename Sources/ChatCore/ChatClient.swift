@@ -3,25 +3,17 @@ import Foundation
 public struct ChatClient: Sendable {
     public let config: ServerConfig
     let session: URLSession
+    /// Told about every request the client makes, once, when it finishes, fails or is cancelled.
+    let record: (@Sendable (Exchange) -> Void)?
 
-    public init(config: ServerConfig, session: URLSession = .shared) {
+    public init(config: ServerConfig, session: URLSession = .shared, record: (@Sendable (Exchange) -> Void)? = nil) {
         self.config = config
         self.session = session
+        self.record = record
     }
 
     public func models() async throws -> [ServedModel] {
-        var request = URLRequest(url: config.baseURL.appendingPathComponent("models"))
-        request.timeoutInterval = 15
-        authorize(&request)
-
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw ChatClientError.invalidResponse }
-        guard (200..<300).contains(http.statusCode) else {
-            throw Self.httpError(status: http.statusCode, body: data)
-        }
-        guard let list = try? JSONDecoder().decode(WireModelList.self, from: data) else {
-            throw ChatClientError.invalidResponse
-        }
+        let list = try await modelList()
         let models = if config.baseURL.host() == OpenAIModels.host {
             list.data.filter { OpenAIModels.isOffered($0.id) }
                 .map { ServedModel(id: $0.id, makesImages: OpenAIModels.makesImages($0.id)) }
@@ -32,6 +24,21 @@ public struct ChatClient: Sendable {
             }
         }
         return models.sorted { $0.id < $1.id }
+    }
+
+    func modelList() async throws -> WireModelList {
+        var request = URLRequest(url: config.baseURL.appendingPathComponent("models"))
+        request.timeoutInterval = 15
+        authorize(&request)
+
+        let (data, http) = try await perform(request, purpose: .models)
+        guard (200..<300).contains(http.statusCode) else {
+            throw Self.httpError(status: http.statusCode, body: data)
+        }
+        guard let list = try? JSONDecoder().decode(WireModelList.self, from: data) else {
+            throw ChatClientError.invalidResponse
+        }
+        return list
     }
 
     /// Asks an image model for one picture and returns its bytes as the server encoded them.
@@ -57,8 +64,7 @@ public struct ChatClient: Sendable {
             request.httpBody = form.closed
         }
 
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw ChatClientError.invalidResponse }
+        let (data, http) = try await perform(request, purpose: .image)
         guard (200..<300).contains(http.statusCode) else { throw Self.httpError(status: http.statusCode, body: data) }
         guard let image = (try? JSONDecoder().decode(WireImageResponse.self, from: data))?.data.first else {
             throw ChatClientError.invalidResponse
@@ -70,61 +76,41 @@ public struct ChatClient: Sendable {
         }
         var download = URLRequest(url: url)
         if url.host() == config.baseURL.host() { authorize(&download) }
-        let (bytes, fetched) = try await session.data(for: download)
-        guard let status = (fetched as? HTTPURLResponse)?.statusCode, (200..<300).contains(status) else {
-            throw ChatClientError.invalidResponse
-        }
+        let (bytes, fetched) = try await perform(download, purpose: .image)
+        guard (200..<300).contains(fetched.statusCode) else { throw ChatClientError.invalidResponse }
         return bytes
     }
 
+    /// `includeUsage` asks for a final chunk with token counts. A server that refuses the field with a 400, or a
+    /// 422 as FastAPI validation gives, is asked again without it. That shows as `.adapted(.usageNotRequested)`
+    /// before the retried stream. Pass false for a host that already refused.
     public func stream(
         model: String,
         messages: [ChatMessage],
         reasoningEffort: ReasoningEffort? = nil,
         images: ImageStore? = nil,
-        tools: [ToolSpec] = []
+        tools: [ToolSpec] = [],
+        includeUsage: Bool = true,
+        purpose: Exchange.Purpose = .chat
     ) -> AsyncThrowingStream<StreamEvent, Error> {
         let client = self
 
         return AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    // Built here, off the caller's thread, because it reads and encodes every photo in the chat.
-                    let request = try client.chatRequest(model: model, messages: messages,
-                                                         reasoningEffort: reasoningEffort, images: images, tools: tools)
-                    let (bytes, response) = try await client.session.bytes(for: request)
-                    guard let http = response as? HTTPURLResponse else { throw ChatClientError.invalidResponse }
-                    guard (200..<300).contains(http.statusCode) else {
-                        var body = Data()
-                        for try await byte in bytes {
-                            body.append(byte)
-                            if body.count >= 64 * 1024 { break }
+                    var includeUsage = includeUsage
+                    while true {
+                        // Built here, off the caller's thread, because it reads and encodes every photo in the chat.
+                        let request = try client.chatRequest(model: model, messages: messages, reasoningEffort: reasoningEffort,
+                                                             images: images, tools: tools, includeUsage: includeUsage)
+                        do {
+                            try await client.read(request, purpose: purpose, into: continuation)
+                            break
+                        } catch ChatClientError.http(let status, let message)
+                            where includeUsage && [400, 422].contains(status) && Self.namesStreamOptions(message) {
+                            includeUsage = false
+                            continuation.yield(.adapted(.usageNotRequested))
                         }
-                        throw Self.httpError(status: http.statusCode, body: body)
-                    }
-
-                    let decoder = SSEDecoder()
-                    var splitter = ThinkTagSplitter()
-                    var finished = false
-
-                    lines: for try await line in bytes.lines {
-                        for event in try decoder.decode(line: line) {
-                            switch event {
-                            case .content(let text):
-                                splitter.push(text).forEach { continuation.yield($0) }
-                            case .reasoning, .toolCall:
-                                continuation.yield(event)
-                            case .done:
-                                splitter.flush().forEach { continuation.yield($0) }
-                                continuation.yield(event)
-                                finished = true
-                                break lines
-                            }
-                        }
-                    }
-                    if !finished {
-                        splitter.flush().forEach { continuation.yield($0) }
-                        continuation.yield(.done(finishReason: nil))
                     }
                     continuation.finish()
                 } catch {
@@ -135,9 +121,81 @@ public struct ChatClient: Sendable {
         }
     }
 
+    private static func namesStreamOptions(_ message: String) -> Bool {
+        let text = message.lowercased()
+        return text.contains("stream_options") || text.contains("stream options")
+    }
+
+    /// Reads to the end of the stream, `[DONE]` included, since token counts follow the finish reason.
+    private func read(_ request: URLRequest, purpose: Exchange.Purpose,
+                      into continuation: AsyncThrowingStream<StreamEvent, Error>.Continuation) async throws {
+        try await captured(request, purpose: purpose) { exchange in
+            var body = BodyCapture()
+            defer { exchange.store(body) }
+            let (bytes, response) = try await session.bytes(for: request)
+            guard let http = response as? HTTPURLResponse else { throw ChatClientError.invalidResponse }
+            exchange.receive(http)
+            exchange.firstByteAt = Date()
+            guard (200..<300).contains(http.statusCode) else {
+                var failure = Data()
+                for try await byte in bytes {
+                    body.append(byte)
+                    failure.append(byte)
+                    if failure.count >= 64 * 1024 { break }
+                }
+                throw Self.httpError(status: http.statusCode, body: failure)
+            }
+
+            let decoder = SSEDecoder()
+            var splitter = ThinkTagSplitter()
+            var lines = LineBuffer()
+            var finished = false
+            var ended = false
+
+            func handle(_ line: String) throws {
+                for event in try decoder.decode(line: line) {
+                    switch event {
+                    case .content(let text):
+                        guard !finished else { continue }
+                        exchange.firstTokenAt = exchange.firstTokenAt ?? Date()
+                        splitter.push(text).forEach { continuation.yield($0) }
+                    case .reasoning, .toolCall:
+                        guard !finished else { continue }
+                        exchange.firstTokenAt = exchange.firstTokenAt ?? Date()
+                        continuation.yield(event)
+                    case .usage(let usage):
+                        exchange.usage = usage
+                        continuation.yield(event)
+                    case .done(let reason):
+                        if !finished {
+                            splitter.flush().forEach { continuation.yield($0) }
+                            continuation.yield(event)
+                            finished = true
+                        }
+                        ended = reason == nil
+                    case .adapted:
+                        break
+                    }
+                }
+            }
+
+            for try await byte in bytes {
+                body.append(byte)
+                guard let line = lines.push(byte) else { continue }
+                try handle(line)
+                if ended { break }
+            }
+            if !ended, let line = lines.flush() { try handle(line) }
+            if !finished {
+                splitter.flush().forEach { continuation.yield($0) }
+                continuation.yield(.done(finishReason: nil))
+            }
+        }
+    }
+
     /// A photo missing from `images` is left out rather than failing the whole request.
     func chatRequest(model: String, messages: [ChatMessage], reasoningEffort: ReasoningEffort? = nil,
-                     images: ImageStore? = nil, tools: [ToolSpec] = []) throws -> URLRequest {
+                     images: ImageStore? = nil, tools: [ToolSpec] = [], includeUsage: Bool = true) throws -> URLRequest {
         var request = URLRequest(url: config.baseURL.appendingPathComponent("chat/completions"))
         request.httpMethod = "POST"
         // Local models can spend minutes on prompt processing before the first token.
@@ -153,6 +211,7 @@ public struct ChatClient: Sendable {
                     WireMessage.expanding($0, images: $0.role == .user ? $0.images.compactMap { id in images?.data(for: id) } : [])
                 },
                 stream: true,
+                streamOptions: includeUsage ? .init() : nil,
                 reasoningEffort: reasoningEffort,
                 tools: tools.isEmpty ? nil : tools.map {
                     .init(function: .init(name: $0.name, description: $0.description, parameters: $0.parameters))

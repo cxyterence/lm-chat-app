@@ -26,16 +26,26 @@ func write(_ text: String, to url: URL) throws {
 
 /// A fake OpenAI-compatible server reached through URLProtocol. Each instance owns a unique host,
 /// so tests using different servers can run in parallel.
+/// A reply with status 0 fails the connection, and `holdsOpen` leaves a response unfinished, like a stream
+/// that is still going.
 final class StubServer: @unchecked Sendable {
     typealias Reply = (status: Int, body: String)
 
     let host = "stub-\(UUID().uuidString.lowercased()).test"
-    private let respond: @Sendable ([String: Any]) -> Reply
+    let holdsOpen: Bool
+    private let respond: @Sendable (_ path: String, _ body: [String: Any]) -> Reply
     private let lock = NSLock()
     private var received: [[String: Any]] = []
 
-    init(respond: @escaping @Sendable ([String: Any]) -> Reply) {
-        self.respond = respond
+    init(holdsOpen: Bool = false, respond: @escaping @Sendable ([String: Any]) -> Reply) {
+        self.holdsOpen = holdsOpen
+        self.respond = { _, body in respond(body) }
+        StubProtocol.register(self)
+    }
+
+    init(route: @escaping @Sendable (_ path: String, _ body: [String: Any]) -> Reply) {
+        holdsOpen = false
+        respond = route
         StubProtocol.register(self)
     }
 
@@ -44,16 +54,33 @@ final class StubServer: @unchecked Sendable {
     /// Every request as sent, oldest first.
     var requests: [(path: String, contentType: String?, body: Data)] { lock.withLock { raw } }
 
-    var client: ChatClient {
+    var client: ChatClient { makeClient(apiKey: "") }
+
+    func makeClient(apiKey: String, record: (@Sendable (Exchange) -> Void)? = nil) -> ChatClient {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StubProtocol.self]
-        return ChatClient(config: try! ServerConfig.parse(baseURL: "http://\(host)/v1", apiKey: ""),
-                          session: URLSession(configuration: configuration))
+        return ChatClient(config: try! ServerConfig.parse(baseURL: "http://\(host)/v1", apiKey: apiKey),
+                          session: URLSession(configuration: configuration), record: record)
     }
 
     fileprivate func handle(_ body: [String: Any], raw request: (path: String, contentType: String?, body: Data)) -> Reply {
         lock.withLock { received.append(body); raw.append(request) }
-        return respond(body)
+        return respond(request.path, body)
+    }
+}
+
+/// Collects the exchanges a client reports.
+final class Recorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [Exchange] = []
+
+    var exchanges: [Exchange] { lock.withLock { items } }
+    var sink: @Sendable (Exchange) -> Void { { [self] exchange in lock.withLock { items.append(exchange) } } }
+
+    /// Waits for `count` exchanges, since a stream reports from its own task after the caller has moved on.
+    func wait(for count: Int) async -> [Exchange] {
+        for _ in 0..<300 where exchanges.count < count { try? await Task.sleep(for: .milliseconds(10)) }
+        return exchanges
     }
 }
 
@@ -78,11 +105,15 @@ final class StubProtocol: URLProtocol {
         let body = Self.body(of: request) ?? Data()
         let reply = server.handle(jsonObject(body) ?? [:],
                                   raw: (request.url?.path ?? "", request.value(forHTTPHeaderField: "Content-Type"), body))
-        let response = HTTPURLResponse(url: request.url!, statusCode: reply.status, httpVersion: "HTTP/1.1",
+        let response = HTTPURLResponse(url: request.url!, statusCode: max(reply.status, 200), httpVersion: "HTTP/1.1",
                                        headerFields: ["Content-Type": "text/event-stream"])!
+        if reply.status == 0 {
+            client?.urlProtocol(self, didFailWithError: URLError(.cannotConnectToHost))
+            return
+        }
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: Data(reply.body.utf8))
-        client?.urlProtocolDidFinishLoading(self)
+        if !server.holdsOpen { client?.urlProtocolDidFinishLoading(self) }
     }
 
     override func stopLoading() {}

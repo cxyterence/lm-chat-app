@@ -40,6 +40,13 @@ public enum JSONValue: Codable, Equatable, Sendable {
         if case .string(let v) = self { return v }
         return nil
     }
+
+    /// The elements of an array of strings, nil for anything else.
+    var strings: [String]? {
+        guard case .array(let items) = self else { return nil }
+        let strings = items.compactMap(\.string)
+        return strings.count == items.count ? strings : nil
+    }
 }
 
 /// A function the model may call, in the shape OpenAI's `tools` field takes.

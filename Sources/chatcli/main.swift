@@ -8,6 +8,7 @@ struct Options {
     var listModels = false
     var titleOnly = false
     var listEfforts = false
+    var inspect = false
     var effort: ReasoningEffort?
     var prompt: String?
     var images: [String] = []
@@ -20,12 +21,55 @@ func write(_ text: String, to handle: FileHandle) {
     handle.write(Data(text.utf8))
 }
 
+/// Every request made this run, for `--inspect`. Empty without it.
+final class ExchangeLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var exchanges: [Exchange] = []
+
+    func add(_ exchange: Exchange) { lock.withLock { exchanges.append(exchange) } }
+    var all: [Exchange] { lock.withLock { exchanges } }
+}
+
+let exchangeLog = ExchangeLog()
+
 func fail(_ message: String) -> Never {
+    printExchanges()
     write("error: \(message)\n", to: .standardError)
     exit(1)
 }
 
-let usage = "usage: chatcli --base <url> [--key K] [--model M] [--models] [--efforts] [--title] [--effort <\(ReasoningEffort.allCases.map(\.rawValue).joined(separator: "|"))>] [--image <file>]... [--image-out <file> [--ar W:H] [--res N]] \"prompt\"\n  --image-out writes a picture from an image model, to probe the server. With --image it edits those photos. --ar picks the shape, such as 16:9. --res picks the long edge: 1k, 2k, 4k or 256 to 4096 pixels."
+func seconds(_ interval: TimeInterval) -> String { String(format: "%.3f s", interval) }
+
+/// Each request in the order it finished: status, timing, tokens, then the curl command that repeats it.
+/// The key is never in an exchange, so none of this shows it.
+func printExchanges() {
+    let all = exchangeLog.all
+    for (index, exchange) in all.enumerated() {
+        var lines = ["", "=== request \(index + 1) of \(all.count): \(exchange.purpose.rawValue) ===",
+                     "\(exchange.method) \(exchange.url.absoluteString)",
+                     "status: \(exchange.status.map(String.init) ?? "no response")"]
+        if let error = exchange.error { lines.append("error: \(error)") }
+        if let byte = exchange.firstByteAt { lines.append("time to first byte: \(seconds(byte.timeIntervalSince(exchange.startedAt)))") }
+        let stats = exchange.stats
+        if let first = stats.timeToFirstToken { lines.append("time to first token: \(seconds(first))") }
+        if let total = stats.totalTime { lines.append("total time: \(seconds(total))") }
+        if let rate = stats.tokensPerSecond { lines.append(String(format: "speed: %.1f tokens/s", rate)) }
+        if let usage = exchange.usage {
+            let counts = [usage.promptTokens.map { "\($0) prompt" }, usage.completionTokens.map { "\($0) completion" },
+                          usage.reasoningTokens.map { "\($0) reasoning" }].compactMap { $0 }
+            lines.append("tokens: \(counts.joined(separator: ", "))")
+        } else if exchange.purpose == .chat || exchange.purpose == .title {
+            lines.append("tokens: not reported")
+        }
+        if let status = exchange.status, !(200..<300).contains(status) {
+            lines.append("response: \(exchange.responseBody.prefix(1000))")
+        }
+        lines += ["curl:", exchange.curl]
+        print(lines.joined(separator: "\n"))
+    }
+}
+
+let usage = "usage: chatcli --base <url> [--key K] [--model M] [--models] [--efforts] [--inspect] [--title] [--effort <\(ReasoningEffort.allCases.map(\.rawValue).joined(separator: "|"))>] [--image <file>]... [--image-out <file> [--ar W:H] [--res N]] \"prompt\"\n  --inspect prints every request made, with status, timing, tokens and a curl command, after the reply.\n  --image-out writes a picture from an image model, to probe the server. With --image it edits those photos. --ar picks the shape, such as 16:9. --res picks the long edge: 1k, 2k, 4k or 256 to 4096 pixels."
 
 func parseOptions(_ args: [String]) -> Options {
     var options = Options()
@@ -60,6 +104,7 @@ func parseOptions(_ args: [String]) -> Options {
         case "--models": options.listModels = true
         case "--title": options.titleOnly = true
         case "--efforts": options.listEfforts = true
+        case "--inspect": options.inspect = true
         case "-h", "--help": print(usage); exit(0)
         default: options.prompt = arg
         }
@@ -69,7 +114,9 @@ func parseOptions(_ args: [String]) -> Options {
 
 func run(_ options: Options) async throws {
     guard let base = options.base else { fail("--base is required\n\(usage)") }
-    let client = ChatClient(config: try ServerConfig.parse(baseURL: base, apiKey: options.key))
+    var record: (@Sendable (Exchange) -> Void)?
+    if options.inspect { record = { exchangeLog.add($0) } }
+    let client = ChatClient(config: try ServerConfig.parse(baseURL: base, apiKey: options.key), record: record)
 
     let models = try await client.models()
     if options.listModels {
@@ -125,7 +172,9 @@ func run(_ options: Options) async throws {
             write(text, to: .standardOutput)
         case .done:
             write("\n", to: .standardOutput)
-        case .toolCall:
+        case .adapted(let adaptation):
+            write("note: \(adaptation.note)\n", to: .standardError)
+        case .toolCall, .usage:
             break
         }
     }
@@ -133,6 +182,7 @@ func run(_ options: Options) async throws {
 
 do {
     try await run(parseOptions(Array(CommandLine.arguments.dropFirst())))
+    printExchanges()
 } catch {
     fail(error.localizedDescription)
 }
