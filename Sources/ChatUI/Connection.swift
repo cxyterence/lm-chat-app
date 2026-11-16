@@ -1,3 +1,4 @@
+import ChatCore
 import Foundation
 
 /// One saved server. The API key isn't stored here: it lives in `Secrets` under `secretAccount`.
@@ -8,13 +9,31 @@ struct Connection: Identifiable, Codable, Equatable {
     /// The model last picked while this connection was active, so switching back restores it.
     var model = ""
     var systemPrompt = ""
+    var api = WireAPI.chatCompletions
 
     var secretAccount: String { "connection.\(id.uuidString)" }
+
+    func serverConfig(apiKey: String?) -> ServerConfig {
+        ServerConfig(baseURL: baseURL, apiKey: apiKey, api: api)
+    }
 
     /// Host and port, enough to tell two servers on one machine apart.
     static func address(of url: URL) -> String {
         guard let host = url.host() else { return url.absoluteString }
         return url.port.map { "\(host):\($0)" } ?? host
+    }
+}
+
+extension Connection {
+    /// Connections saved before `api` existed have no such key, and keep using chat completions.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        baseURL = try c.decode(URL.self, forKey: .baseURL)
+        model = try c.decode(String.self, forKey: .model)
+        systemPrompt = try c.decode(String.self, forKey: .systemPrompt)
+        api = try c.decodeIfPresent(WireAPI.self, forKey: .api) ?? .chatCompletions
     }
 }
 

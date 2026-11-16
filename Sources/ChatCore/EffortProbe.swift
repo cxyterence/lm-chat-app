@@ -22,20 +22,28 @@ extension ChatClient {
         switch reply.status {
         case 200..<300: return true
         case 400, 422:
-            let body = reply.text.lowercased()
-            return !(body.contains("reasoning_effort") || body.contains("reasoning effort"))
+            // vLLM's Responses endpoint names the field `body.reasoning.effort`.
+            return !reply.text.lowercased().contains("effort")
         default: throw reply.error
         }
     }
 
     /// Sends a one-token request. Any status comes back as a reply, for the caller to read.
     func probe(_ body: WireProbeRequest) async throws -> ProbeReply {
-        var request = URLRequest(url: config.baseURL.appendingPathComponent("chat/completions"))
+        var request = URLRequest(url: config.baseURL.appendingPathComponent(config.api == .responses ? "responses" : "chat/completions"))
         request.httpMethod = "POST"
         request.timeoutInterval = 30
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         authorize(&request)
-        request.httpBody = try JSONEncoder().encode(body)
+        switch config.api {
+        case .chatCompletions:
+            request.httpBody = try JSONEncoder().encode(body)
+        case .responses:
+            var probe = WireResponsesRequest(model: body.model, messages: body.messages, stream: false, effort: body.reasoningEffort,
+                                             tools: (body.tools ?? []).map(WireResponsesTool.init))
+            probe.maxOutputTokens = 16
+            request.httpBody = try JSONEncoder().encode(probe)
+        }
 
         let (data, http) = try await perform(request, purpose: .probe)
         return ProbeReply(status: http.statusCode, data: data)

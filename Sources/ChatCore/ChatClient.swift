@@ -81,7 +81,8 @@ public struct ChatClient: Sendable {
         return bytes
     }
 
-    /// `includeUsage` asks for a final chunk with token counts. A server that answers a request carrying it with a 400
+    /// `includeUsage` asks for a final chunk with token counts, on chat completions only: a Responses stream always
+    /// ends with them. A server that answers a request carrying it with a 400
     /// or a 422 (FastAPI's validation) is asked again without it, whatever the message says, since strict servers
     /// word the refusal in their own way. That shows as `.adapted(.usageNotRequested)` before the retried stream, and
     /// only when the retry gets through. A retry that fails too throws its own error, the one the request would have
@@ -104,8 +105,14 @@ public struct ChatClient: Sendable {
                     var adaptation: Adaptation?
                     while true {
                         // Built here, off the caller's thread, because it reads and encodes every photo in the chat.
-                        let request = try client.chatRequest(model: model, messages: messages, reasoningEffort: reasoningEffort,
-                                                             images: images, tools: tools, includeUsage: includeUsage)
+                        let request = switch client.config.api {
+                        case .chatCompletions:
+                            try client.chatRequest(model: model, messages: messages, reasoningEffort: reasoningEffort,
+                                                   images: images, tools: tools, includeUsage: includeUsage)
+                        case .responses:
+                            try client.responsesRequest(model: model, messages: messages, reasoningEffort: reasoningEffort,
+                                                        images: images, tools: tools)
+                        }
                         do {
                             try await client.read(request, purpose: purpose) { event in
                                 if let pending = adaptation {
@@ -115,7 +122,8 @@ public struct ChatClient: Sendable {
                                 continuation.yield(event)
                             }
                             break
-                        } catch ChatClientError.http(let status, _) where includeUsage && [400, 422].contains(status) {
+                        } catch ChatClientError.http(let status, _)
+                            where includeUsage && client.config.api == .chatCompletions && [400, 422].contains(status) {
                             includeUsage = false
                             adaptation = .usageNotRequested
                         }
@@ -170,7 +178,7 @@ public struct ChatClient: Sendable {
                 grace?.cancel()
             }
 
-            let decoder = SSEDecoder()
+            let decodeLine = config.api == .responses ? ResponsesDecoder().decode(line:) : SSEDecoder().decode(line:)
             var splitter = ThinkTagSplitter()
             var lines = LineBuffer()
             var finished = false
@@ -179,7 +187,7 @@ public struct ChatClient: Sendable {
             func handle(_ line: String) throws {
                 let events: [StreamEvent]
                 do {
-                    events = try decoder.decode(line: line)
+                    events = try decodeLine(line)
                 } catch where finished {
                     return
                 }
@@ -207,7 +215,8 @@ public struct ChatClient: Sendable {
                                 feed.finish()
                             }
                         }
-                        ended = ended || reason == nil
+                        // A Responses stream puts its token counts before the finish, so nothing follows it.
+                        ended = ended || reason == nil || config.api == .responses
                     case .adapted:
                         break
                     }
@@ -232,20 +241,10 @@ public struct ChatClient: Sendable {
     /// A photo missing from `images` is left out rather than failing the whole request.
     func chatRequest(model: String, messages: [ChatMessage], reasoningEffort: ReasoningEffort? = nil,
                      images: ImageStore? = nil, tools: [ToolSpec] = [], includeUsage: Bool = true) throws -> URLRequest {
-        var request = URLRequest(url: config.baseURL.appendingPathComponent("chat/completions"))
-        request.httpMethod = "POST"
-        // Local models can spend minutes on prompt processing before the first token.
-        request.timeoutInterval = 600
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        authorize(&request)
-        request.httpBody = try JSONEncoder().encode(
+        try streamingRequest(path: "chat/completions", body:
             WireChatRequest(
                 model: model,
-                messages: messages.flatMap {
-                    // Only the user's photos go to the model. Pictures a model drew stay on screen.
-                    WireMessage.expanding($0, images: $0.role == .user ? $0.images.compactMap { id in images?.data(for: id) } : [])
-                },
+                messages: Self.wireMessages(messages, images: images),
                 stream: true,
                 streamOptions: includeUsage ? .init() : nil,
                 reasoningEffort: reasoningEffort,
@@ -254,6 +253,32 @@ public struct ChatClient: Sendable {
                 }
             )
         )
+    }
+
+    func responsesRequest(model: String, messages: [ChatMessage], reasoningEffort: ReasoningEffort? = nil,
+                          images: ImageStore? = nil, tools: [ToolSpec] = []) throws -> URLRequest {
+        try streamingRequest(path: "responses", body:
+            WireResponsesRequest(model: model, messages: Self.wireMessages(messages, images: images), stream: true,
+                                 effort: reasoningEffort?.rawValue, tools: tools.map(WireResponsesTool.init))
+        )
+    }
+
+    private static func wireMessages(_ messages: [ChatMessage], images: ImageStore?) -> [WireMessage] {
+        messages.flatMap {
+            // Only the user's photos go to the model. Pictures a model drew stay on screen.
+            WireMessage.expanding($0, images: $0.role == .user ? $0.images.compactMap { id in images?.data(for: id) } : [])
+        }
+    }
+
+    private func streamingRequest(path: String, body: some Encodable) throws -> URLRequest {
+        var request = URLRequest(url: config.baseURL.appendingPathComponent(path))
+        request.httpMethod = "POST"
+        // Local models can spend minutes on prompt processing before the first token.
+        request.timeoutInterval = 600
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        authorize(&request)
+        request.httpBody = try JSONEncoder().encode(body)
         return request
     }
 

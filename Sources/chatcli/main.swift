@@ -10,6 +10,7 @@ struct Options {
     var listEfforts = false
     var capabilities = false
     var inspect = false
+    var api = WireAPI.chatCompletions
     var effort: ReasoningEffort?
     var prompt: String?
     var images: [String] = []
@@ -95,7 +96,7 @@ func printReport(_ report: CapabilityReport, model: String) {
     report.server.forEach { print("  \($0.name): \($0.value)") }
 }
 
-let usage = "usage: chatcli --base <url> [--key K] [--model M] [--models] [--efforts] [--capabilities] [--inspect] [--title] [--effort <\(ReasoningEffort.allCases.map(\.rawValue).joined(separator: "|"))>] [--image <file>]... [--image-out <file> [--ar W:H] [--res N]] \"prompt\"\n  --capabilities checks what --model supports: tools, vision, reasoning levels, context length. --inspect prints every request made, with status, timing, tokens and a curl command, after the reply.\n  --image-out writes a picture from an image model, to probe the server. With --image it edits those photos. --ar picks the shape, such as 16:9. --res picks the long edge: 1k, 2k, 4k or 256 to 4096 pixels."
+let usage = "usage: chatcli --base <url> [--key K] [--model M] [--models] [--efforts] [--capabilities] [--inspect] [--api chat-completions|responses] [--title] [--effort <\(ReasoningEffort.allCases.map(\.rawValue).joined(separator: "|"))>] [--image <file>]... [--image-out <file> [--ar W:H] [--res N]] \"prompt\"\n  --api picks the wire format: chat-completions (the default) or responses. --capabilities checks what --model supports: tools, vision, reasoning levels, context length. --inspect prints every request made, with status, timing, tokens and a curl command, after the reply.\n  --image-out writes a picture from an image model, to probe the server. With --image it edits those photos. --ar picks the shape, such as 16:9. --res picks the long edge: 1k, 2k, 4k or 256 to 4096 pixels."
 
 func parseOptions(_ args: [String]) -> Options {
     var options = Options()
@@ -127,6 +128,12 @@ func parseOptions(_ args: [String]) -> Options {
                 fail("invalid --res \(raw). expected 1k, 2k, 4k or 256 to 4096")
             }
             options.longEdge = longEdge
+        case "--api":
+            switch value(for: arg) {
+            case "chat-completions": options.api = .chatCompletions
+            case "responses": options.api = .responses
+            case let other: fail("invalid --api \(other). valid: chat-completions, responses")
+            }
         case "--models": options.listModels = true
         case "--title": options.titleOnly = true
         case "--efforts": options.listEfforts = true
@@ -143,7 +150,9 @@ func run(_ options: Options) async throws {
     guard let base = options.base else { fail("--base is required\n\(usage)") }
     var record: (@Sendable (Exchange) -> Void)?
     if options.inspect { record = { exchangeLog.add($0) } }
-    let client = ChatClient(config: try ServerConfig.parse(baseURL: base, apiKey: options.key), record: record)
+    var config = try ServerConfig.parse(baseURL: base, apiKey: options.key)
+    config.api = options.api
+    let client = ChatClient(config: config, record: record)
 
     let models = try await client.models()
     if options.listModels {

@@ -87,6 +87,11 @@ final class StubServer: @unchecked Sendable {
     nonisolated(unsafe) var mcp: FakeMCP?
     /// Answers the one-token requests that effort and capability checks send (chat requests that don't stream).
     nonisolated(unsafe) var probe: (@Sendable ([String: Any]) -> Reply)?
+    /// Answers streamed POST /v1/responses requests when set. Title requests are answered "Stub Title" and left out.
+    nonisolated(unsafe) var responses: (@Sendable ([String: Any]) -> Reply)?
+    private var responded: [[String: Any]] = []
+    /// Bodies of the streamed Responses requests the app chose to make, oldest first.
+    var responseRequests: [[String: Any]] { lock.withLock { responded } }
     /// Answers GET /server_info when set.
     nonisolated(unsafe) var serverInfo: Reply?
     var root: URL { URL(string: "http://\(host)")! }
@@ -126,6 +131,14 @@ final class StubServer: @unchecked Sendable {
             lock.withLock { edits.append(raw) }
             return image([:])
         }
+        if path.hasSuffix("/responses") {
+            if body["stream"] as? Bool != true, let probe { return probe(body) }
+            guard let responses else { return (404, "") }
+            let first = (body["input"] as? [[String: Any]])?.first?["content"] as? String
+            if first?.hasPrefix("You name chat conversations") == true { return (200, responsesStream(["Stub Title"])) }
+            lock.withLock { responded.append(body) }
+            return responses(body)
+        }
         guard path.hasSuffix("chat/completions"), body["stream"] as? Bool == true else { return (404, "") }
         if transcript(body).first?.text.hasPrefix("You name chat conversations") == true {
             lock.withLock { named.append(body) }
@@ -141,6 +154,27 @@ func sse(_ chunks: [String]) -> String {
         let event = ["choices": [["index": 0, "delta": ["content": chunk]]]]
         return "data: " + String(decoding: try! JSONSerialization.data(withJSONObject: event), as: UTF8.self) + "\n\n"
     }.joined() + "data: [DONE]\n\n"
+}
+
+/// A Responses stream as vLLM and OpenAI send it, ending with `response.completed` and its token counts.
+func responsesStream(_ chunks: [String], prompt: Int = 7, completion: Int = 3) -> String {
+    func line(_ event: [String: Any]) -> String {
+        "data: " + String(decoding: try! JSONSerialization.data(withJSONObject: event), as: UTF8.self) + "\n\n"
+    }
+    let usage: [String: Any] = ["input_tokens": prompt, "output_tokens": completion, "output_tokens_details": ["reasoning_tokens": 0]]
+    return chunks.map { line(["type": "response.output_text.delta", "delta": $0, "output_index": 0]) }.joined()
+        + line(["type": "response.completed", "response": ["output": [["type": "message"]], "usage": usage]])
+}
+
+/// A Responses stream in which the model calls `name`.
+func responsesToolCall(_ name: String, id: String = "call_1", arguments: String = "{}") -> String {
+    func line(_ event: [String: Any]) -> String {
+        "data: " + String(decoding: try! JSONSerialization.data(withJSONObject: event), as: UTF8.self) + "\n\n"
+    }
+    return line(["type": "response.output_item.added", "output_index": 0,
+                 "item": ["type": "function_call", "call_id": id, "name": name, "arguments": ""]])
+        + line(["type": "response.function_call_arguments.delta", "output_index": 0, "delta": arguments])
+        + line(["type": "response.completed", "response": ["output": [["type": "function_call", "call_id": id, "name": name]]]])
 }
 
 /// A chat stream that ends with the token counts, as a server does when asked for `include_usage`.

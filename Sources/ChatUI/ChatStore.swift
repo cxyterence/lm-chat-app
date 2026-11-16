@@ -168,7 +168,7 @@ public final class ChatStore {
     }
 
     var config: ServerConfig? {
-        activeConnection.map { ServerConfig(baseURL: $0.baseURL, apiKey: apiKeys[$0.id]) }
+        activeConnection.map { $0.serverConfig(apiKey: apiKeys[$0.id]) }
     }
 
     var model: String { activeConnection?.model ?? "" }
@@ -199,13 +199,19 @@ public final class ChatStore {
     /// The image models a saved connection serves, listed with that connection's own key.
     func imageModels(of id: UUID) async throws -> [String] {
         guard let connection = connections.first(where: { $0.id == id }) else { return [] }
-        let config = ServerConfig(baseURL: connection.baseURL, apiKey: apiKeys[id])
+        let config = connection.serverConfig(apiKey: apiKeys[id])
         return try await ChatClient(config: config, session: session).models().filter(\.makesImages).map(\.id)
     }
 
     /// Adds a new connection or replaces the one with the same ID. A new one becomes active.
     func saveConnection(_ connection: Connection, apiKey: String) {
         let isNew = !connections.contains { $0.id == connection.id }
+        if connections.first(where: { $0.id == connection.id })?.api != connection.api && !isNew {
+            // What was learned about a model on the other API says nothing about this one.
+            toolless = [:]
+            toolsNeedNoReasoning = []
+            capabilityChecks = capabilityChecks.filter { $0.key.connection != connection.id }
+        }
         if isNew {
             connections.append(connection)
         } else {
@@ -362,7 +368,7 @@ public final class ChatStore {
         liveReply?.status = nil
         var tools = OfferedTool.offer(found).map(ReplyTool.mcp)
         if let tool = imageTool, let connection = connections.first(where: { $0.id == tool.connectionID }) {
-            let config = ServerConfig(baseURL: connection.baseURL, apiKey: apiKeys[connection.id])
+            let config = connection.serverConfig(apiKey: apiKeys[connection.id])
             tools.append(.image(connection: connection.name, config: config, model: tool.model))
         }
         return tools
@@ -616,7 +622,7 @@ public final class ChatStore {
         let connection = (connections.filter { $0.id == preferred } + connections)
             .first { address.hasPrefix($0.baseURL.absoluteString) }
         guard let connection else { return ServerConfig(baseURL: exchange.url) }
-        return ServerConfig(baseURL: connection.baseURL, apiKey: apiKeys[connection.id])
+        return connection.serverConfig(apiKey: apiKeys[connection.id])
     }
 
     /// Asks a connection's selected model what it supports. When that is the active connection's model, a report
@@ -627,7 +633,7 @@ public final class ChatStore {
         let key = CapabilityKey(connection: connectionID, model: connection.model)
         guard capabilityChecks[key] != .running else { return }
         capabilityChecks[key] = .running
-        let client = ChatClient(config: ServerConfig(baseURL: connection.baseURL, apiKey: apiKeys[connectionID]), session: session)
+        let client = ChatClient(config: connection.serverConfig(apiKey: apiKeys[connectionID]), session: session)
         do {
             let report = try await client.capabilities(model: connection.model)
             capabilityChecks[key] = .done(report)

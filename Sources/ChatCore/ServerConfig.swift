@@ -11,13 +11,27 @@ public struct ServedModel: Equatable, Sendable {
     }
 }
 
+/// The wire format a connection speaks: `POST /chat/completions` or `POST /responses`.
+public enum WireAPI: String, Codable, Sendable {
+    case chatCompletions, responses
+}
+
 public struct ServerConfig: Codable, Equatable, Sendable {
     public var baseURL: URL
     public var apiKey: String?
+    public var api: WireAPI
 
-    public init(baseURL: URL, apiKey: String? = nil) {
+    public init(baseURL: URL, apiKey: String? = nil, api: WireAPI = .chatCompletions) {
         self.baseURL = baseURL
         self.apiKey = apiKey
+        self.api = api
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        baseURL = try c.decode(URL.self, forKey: .baseURL)
+        apiKey = try c.decodeIfPresent(String.self, forKey: .apiKey)
+        api = try c.decodeIfPresent(WireAPI.self, forKey: .api) ?? .chatCompletions
     }
 
     public enum ParseError: Error, Equatable, LocalizedError {

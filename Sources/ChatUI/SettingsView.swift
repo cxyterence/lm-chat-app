@@ -214,6 +214,7 @@ struct ConnectionEditor: View {
     @State private var baseURL = ""
     @State private var apiKey = ""
     @State private var systemPrompt = ""
+    @State private var api = WireAPI.chatCompletions
     @State private var error: String?
     @State private var confirmingDelete = false
     @Environment(\.dismiss) private var dismiss
@@ -239,6 +240,10 @@ struct ConnectionEditor: View {
                     .keyboardType(.URL)
                     #endif
                 SecureField("API key (optional)", text: $apiKey)
+                Picker("API", selection: $api) {
+                    Text("Chat Completions").tag(WireAPI.chatCompletions)
+                    Text("Responses").tag(WireAPI.responses)
+                }
                 if let error {
                     Text(error).foregroundStyle(palette.danger).font(.callout)
                 }
@@ -303,6 +308,7 @@ struct ConnectionEditor: View {
             baseURL = existing.baseURL.absoluteString
             apiKey = store.apiKey(for: existing.id)
             systemPrompt = existing.systemPrompt
+            api = existing.api
         }
     }
 
@@ -323,6 +329,7 @@ struct ConnectionEditor: View {
         connection.name = trimmedName.isEmpty ? Connection.address(of: parsed.baseURL) : trimmedName
         connection.baseURL = parsed.baseURL
         connection.systemPrompt = systemPrompt
+        connection.api = api
         store.saveConnection(connection, apiKey: parsed.apiKey ?? "")
         dismiss()
     }

@@ -56,11 +56,12 @@ final class StubServer: @unchecked Sendable {
 
     var client: ChatClient { makeClient(apiKey: "") }
 
-    func makeClient(apiKey: String, record: (@Sendable (Exchange) -> Void)? = nil) -> ChatClient {
+    func makeClient(apiKey: String, api: WireAPI = .chatCompletions, record: (@Sendable (Exchange) -> Void)? = nil) -> ChatClient {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StubProtocol.self]
-        return ChatClient(config: try! ServerConfig.parse(baseURL: "http://\(host)/v1", apiKey: apiKey),
-                          session: URLSession(configuration: configuration), record: record)
+        var config = try! ServerConfig.parse(baseURL: "http://\(host)/v1", apiKey: apiKey)
+        config.api = api
+        return ChatClient(config: config, session: URLSession(configuration: configuration), record: record)
     }
 
     fileprivate func handle(_ body: [String: Any], raw request: (path: String, method: String?, contentType: String?, body: Data)) -> Reply {
