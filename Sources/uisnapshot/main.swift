@@ -7,9 +7,7 @@ guard CommandLine.arguments.count == 2 else {
 }
 
 do {
-    try await MainActor.run {
-        try UISnapshot.render(to: URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true))
-    }
+    try await UISnapshot.render(to: URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true))
 } catch {
     FileHandle.standardError.write(Data("uisnapshot: \(error.localizedDescription)\n".utf8))
     exit(1)

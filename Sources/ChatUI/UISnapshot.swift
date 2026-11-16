@@ -7,14 +7,15 @@ public enum UISnapshot {
     private static let chatSize = CGSize(width: 900, height: 640)
     private static let settingsSize = CGSize(width: 480, height: 640)
 
-    @MainActor public static func render(to directory: URL) throws {
+    @MainActor public static func render(to directory: URL) async throws {
         NSApplication.shared.setActivationPolicy(.prohibited)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("uisnapshot-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: scratch) }
         try ConversationStore.save([sampleConversation], to: scratch.appendingPathComponent("conversations.json"))
 
-        for theme in Theme.allCases {
+        let only = ProcessInfo.processInfo.environment["UISNAPSHOT_THEMES"].map { Set($0.split(separator: ",").map(String.init)) }
+        for theme in Theme.allCases where only?.contains(theme.rawValue) != false {
             let suite = "uisnapshot.\(theme.rawValue)"
             let defaults = UserDefaults(suiteName: suite)!
             defaults.removePersistentDomain(forName: suite)
@@ -30,11 +31,48 @@ public enum UISnapshot {
 
             try write(RootView(store: store), size: chatSize, appearance: appearance,
                       to: directory.appendingPathComponent("\(theme.rawValue)-chat.png"))
+            try await renderDevTools(theme: theme, appearance: appearance, defaults: defaults, scratch: scratch, to: directory)
             let pages: [(String, SettingsPage?)] = [("root", nil)] + SettingsPage.allCases.map { ($0.rawValue, $0) }
             for (name, page) in pages {
                 try write(SettingsView(store: store, page: page).theme(theme), size: settingsSize, appearance: appearance,
                           to: directory.appendingPathComponent("\(theme.rawValue)-settings-\(name).png"))
             }
+        }
+    }
+
+    /// Every developer-tools screen: a reply with notes and a stats line, the inspector, a request and its response,
+    /// the resend editor, and a failed reply with Inspect.
+    @MainActor private static func renderDevTools(theme: Theme, appearance: NSAppearance?, defaults: UserDefaults,
+                                                  scratch: URL, to directory: URL) async throws {
+        func file(_ name: String) -> URL { directory.appendingPathComponent("\(theme.rawValue)-devtools-\(name).png") }
+        let sample = try DevToolsSnapshot.makeSample(defaults: defaults, directory: scratch)
+        let store = sample.store
+        let phone = DevToolsSnapshot.phone
+
+        try write(RootView(store: store), size: chatSize, appearance: appearance, to: file("reply"))
+        try write(InspectorSheet(store: store, messageID: sample.reply).theme(theme), size: phone, appearance: appearance, to: file("inspector"))
+        func detail(_ exchange: Exchange, part: ExchangeDetail.Part = .request) -> some View {
+            NavigationStack {
+                ExchangeDetail(store: store, exchange: exchange, messageID: sample.reply, part: part, request: exchange.placeholders) { _ in }
+                    .background(theme.palette.groupedBackground)
+            }
+            .theme(theme)
+        }
+        try write(detail(sample.worked), size: phone, appearance: appearance, to: file("request"))
+        try write(detail(sample.worked, part: .response), size: phone, appearance: appearance, to: file("response"))
+        try write(detail(sample.refused), size: phone, appearance: appearance, to: file("request-failed"))
+        let longText = (1...60).map { #"data: {"choices":[{"delta":{"content":"word \#($0) "}}]}"# }.joined(separator: "\n")
+        try write(BodyText(text: longText, empty: "", limit: 1_200).padding().frame(width: 390, alignment: .topLeading)
+                    .background(theme.palette.groupedBackground).theme(theme),
+                  size: CGSize(width: 390, height: 460), appearance: appearance, to: file("response-cut"))
+        try write(ResendEditor(text: sample.worked.displayBody, cancel: {}, send: { _ in }).theme(theme),
+                  size: phone, appearance: appearance, to: file("resend"))
+
+        // A reply that can't reach its server leaves a request with no response, and Inspect on the banner.
+        let failing = try await DevToolsSnapshot.makeFailingStore(defaults: defaults, directory: scratch)
+        try write(RootView(store: failing), size: chatSize, appearance: appearance, to: file("failed"))
+        if let id = failing.failedReply {
+            try write(InspectorSheet(store: failing, messageID: id).theme(theme), size: phone, appearance: appearance, to: file("inspector-failed"))
         }
     }
 
@@ -50,7 +88,7 @@ public enum UISnapshot {
             ])
     }
 
-    @MainActor private static func write(_ view: some View, size: CGSize, appearance: NSAppearance?, to url: URL) throws {
+    @MainActor static func write(_ view: some View, size: CGSize, appearance: NSAppearance?, to url: URL) throws {
         let hosting = NSHostingView(rootView: view)
         let window = NSWindow(contentRect: CGRect(origin: .zero, size: size), styleMask: [.titled],
                               backing: .buffered, defer: false)

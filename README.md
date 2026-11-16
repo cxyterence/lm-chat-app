@@ -9,7 +9,7 @@ A connection is a URL and an optional API key, plus the model and system prompt 
 - `Sources/ChatCore` Foundation-only client, SSE decoding, `<think>` splitting, persistence.
 - `Sources/ChatUI` SwiftUI views and `ChatStore`. Public entry point is `RootView`.
 - `Sources/chatcli` command-line client built on ChatCore.
-- `Sources/uisnapshot` macOS-only tool that renders every theme to PNGs: `swift run uisnapshot <outdir>`.
+- `Sources/uisnapshot` macOS-only tool that renders every theme to PNGs: `swift run uisnapshot <outdir>`. Set `UISNAPSHOT_THEMES=light,dark` to render only some.
 - `App/` the only code in the Xcode app target.
 - `scripts/mock_openai_server.py` stdlib mock server for offline testing.
 
@@ -48,6 +48,14 @@ Settings › MCP Connections adds MCP servers that give the model tools. Tools f
 **GitHub.** Add GitHub fills in GitHub's hosted server, `https://api.githubcopilot.com/mcp/readonly`, which offers only tools that read. Paste a [fine-grained personal access token](https://github.com/settings/personal-access-tokens/new) with read access to the repositories you want the model to see. Turning on Allow changes switches to the full server, whose tools that write ask before running. Every tool's description is sent with each message, so a small local model's context fills faster with more servers switched on.
 
 The mock server also speaks MCP at `/mcp` (all tools) and `/mcp/readonly`, with the token `mock-token`, and its models call a tool when a prompt says "use <tool name>".
+
+## Developer tools
+
+Every request the app makes for a reply is kept in memory beside it, with your key shown as `$API_KEY`. Long-press a reply and choose Inspect, or tap the line under it, such as `0.8 s to first token · 42 tok/s · 1,204 tokens`. A server that reports no token counts gets only the time. The sheet opens on a summary, then one row per request: the reply's own, the one a tool made for a picture, and any you resend. A failed request shows its status and the server's message in red. Tap a row for its request and response as text, with the headers above and Copy, Copy as curl and Edit and Resend below. Photos show as short tokens such as `<image 1: 312 KB>`, in the text and in the curl command. A text over 20,000 characters shows its start and its end and says how much it left out. Copy still takes all of it. Requests are not saved. After a relaunch old replies have no Inspect, editing, retrying or deleting drops a reply's requests, and only the newest 40 requests or 24 MB of bodies are kept. A reply that fails before it shows anything has no message to hang its request on, so it stays behind the error banner's Inspect request until you dismiss the error or retry.
+
+Edit and Resend opens the request body in a plain text editor. Send posts it to the same address with that connection's key, or the image connection's key for a picture request, and adds the answer as a Resent request. The chat is never changed. Leave a photo token where it is to send the photo again.
+
+When the app changes a request for you, the reply says so in a caption under it. Tools are left out when the server refuses them, and stay out of later replies from that model until you quit the app. Reasoning is turned off when the model takes tools only that way. A reasoning level is swapped when the model doesn't take the one you picked. A size is noted when the app chose it for an image edit. Token counts are not asked for when the server refuses `stream_options`. These notes are saved with the chat.
 
 ## chatcli
 

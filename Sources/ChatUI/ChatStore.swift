@@ -84,6 +84,11 @@ public final class ChatStore {
     private(set) var generation: Generation = .idle
     private(set) var liveReply: LiveReply?
     private(set) var persistenceError: String?
+    /// The requests made for each reply, for the inspector. Memory only.
+    private(set) var exchangeLog = ExchangeLog()
+    /// A reply that failed before it showed anything has no message to hang its requests on. They are kept under
+    /// this ID, for the failure banner's Inspect, until the failure is dismissed or the reply is asked for again.
+    private(set) var failedReply: UUID?
     private(set) var mcpServers: [MCPServer] = []
     private(set) var mcpStatus: [UUID: MCPStatus] = [:]
     private var savedImageTool: ImageTool?
@@ -99,10 +104,12 @@ public final class ChatStore {
     @ObservationIgnored private var mcpClients: [UUID: MCPClient] = [:]
     @ObservationIgnored private var mcpTokens: [UUID: String] = [:]
     @ObservationIgnored private var approvalContinuation: CheckedContinuation<Bool, Never>?
-    /// Models whose server refused a request carrying tools. They're asked without tools from then on.
-    @ObservationIgnored private var toolless: Set<String> = []
+    /// Models whose server refused a request carrying tools, with why. They're asked without tools from then on.
+    @ObservationIgnored private var toolless: [String: String] = [:]
     /// Models whose server takes tools only with reasoning off, as OpenAI's gpt-6-luna does.
     @ObservationIgnored private var toolsNeedNoReasoning: Set<String> = []
+    /// Hosts that refused `stream_options`, so their requests don't ask for token counts.
+    @ObservationIgnored private var withoutUsage: Set<String> = []
 
     public convenience init() {
         self.init(defaults: .standard, fileURL: ChatStore.defaultFileURL, secrets: .keychain)
@@ -442,7 +449,10 @@ public final class ChatStore {
 
     func delete(ids: [UUID]) {
         for id in ids where isStreaming(id) { stop() }
-        images.remove(conversations.filter { ids.contains($0.id) }.flatMap(\.messages).flatMap(\.images))
+        let messages = conversations.filter { ids.contains($0.id) }.flatMap(\.messages)
+        images.remove(messages.flatMap(\.images))
+        exchangeLog.drop(messages.map(\.id))
+        if case .failed(let failed, _, _) = generation, ids.contains(failed) { releaseFailedReply() }
         conversations.removeAll { ids.contains($0.id) }
         if let selection, !conversations.contains(where: { $0.id == selection }) {
             self.selection = conversations.first?.id
@@ -501,6 +511,7 @@ public final class ChatStore {
         else { return }
 
         let dropped = conversations[c].messages[m...].flatMap(\.images).filter { !images.contains($0) }
+        exchangeLog.drop(conversations[c].messages[(m + 1)...].map(\.id))
         conversations[c].messages.removeSubrange((m + 1)...)
         conversations[c].messages[m].content = trimmed
         conversations[c].messages[m].images = images
@@ -536,9 +547,62 @@ public final class ChatStore {
         if request == .reply {
             guard let lastUser = conversations[index].messages.lastIndex(where: { $0.role == .user }) else { return }
             images.remove(conversations[index].messages[(lastUser + 1)...].flatMap(\.images))
+            exchangeLog.drop(conversations[index].messages[(lastUser + 1)...].map(\.id))
             conversations[index].messages.removeSubrange((lastUser + 1)...)
         }
         startStreaming(conversationID: id, request: request)
+    }
+
+    // MARK: Developer tools
+
+    func exchanges(for messageID: UUID) -> [Exchange] { exchangeLog.exchanges(for: messageID) }
+
+    /// Where a client reports its requests so they show under `messageID`.
+    private func recorder(for messageID: UUID) -> @Sendable (Exchange) -> Void {
+        { [weak self] exchange in
+            Task { @MainActor in self?.attach(exchange, to: messageID) }
+        }
+    }
+
+    /// Keeps a request with its reply, unless the reply is gone.
+    func attach(_ exchange: Exchange, to messageID: UUID) {
+        guard messageID == failedReply || conversations.contains(where: { $0.messages.contains { $0.id == messageID } }) else { return }
+        exchangeLog.append(exchange, to: messageID)
+    }
+
+    /// Records what the app changed about a reply's request, once.
+    private func adapt(_ adaptation: Adaptation, on messageID: UUID) {
+        for c in conversations.indices {
+            guard let m = conversations[c].messages.firstIndex(where: { $0.id == messageID }) else { continue }
+            if !conversations[c].messages[m].adaptations.contains(adaptation) {
+                conversations[c].messages[m].adaptations.append(adaptation)
+            }
+            return
+        }
+    }
+
+    /// Sends `editedText`, a request's body as the inspector showed it, to the request's own address and keeps the
+    /// answer with the same reply. The chat itself is never touched.
+    @discardableResult
+    func resend(_ exchange: Exchange, editedText: String, for messageID: UUID) async -> Exchange {
+        let body = await Task.detached { exchange.placeholders.restore(editedText) }.value
+        let client = ChatClient(config: resendConfig(for: exchange), session: session)
+        let result = await client.send(rawBody: body, to: exchange.url,
+                                       contentType: exchange.requestHeader("Content-Type") ?? "application/json")
+        attach(result, to: messageID)
+        return result
+    }
+
+    /// The connection a request was made on, so its key goes with it and only to that server. An image request
+    /// prefers the image connection and any other the active one. A request no connection matches goes without a key.
+    private func resendConfig(for exchange: Exchange) -> ServerConfig {
+        let isImage = exchange.purpose == .image || exchange.url.path.contains("/images/")
+        let preferred = isImage ? imageTool?.connectionID : activeConnectionID
+        let address = exchange.url.absoluteString
+        let connection = (connections.filter { $0.id == preferred } + connections)
+            .first { address.hasPrefix($0.baseURL.absoluteString) }
+        guard let connection else { return ServerConfig(baseURL: exchange.url) }
+        return ServerConfig(baseURL: connection.baseURL, apiKey: apiKeys[connection.id])
     }
 
     // MARK: Commands
@@ -585,20 +649,27 @@ public final class ChatStore {
 
     func dismissFailure() {
         if case .failed = generation { generation = .idle }
+        releaseFailedReply()
+    }
+
+    private func releaseFailedReply() {
+        guard let id = failedReply else { return }
+        exchangeLog.drop([id])
+        failedReply = nil
     }
 
     private func startStreaming(conversationID id: UUID, request: Request = .reply) {
         guard let config, conversations.contains(where: { $0.id == id }) else { return }
+        releaseFailedReply()
         let first = beginOutput(in: id, role: request == .reply ? .assistant : .summary)
-        let client = ChatClient(config: config, session: session)
-        let task = Task { await generate(conversationID: id, request: request, first: first, client: client) }
+        let task = Task { await generate(conversationID: id, request: request, first: first, config: config) }
         generation = .streaming(conversationID: id, task: task)
     }
 
     /// Streams the reply. When the model calls tools, runs them and asks again with their results, each
     /// round its own assistant message, until it answers or uses up its rounds.
-    private func generate(conversationID id: UUID, request: Request, first: UUID, client: ChatClient) async {
-        let (model, effort, systemPrompt, images) = (model, reasoningEffort, systemPrompt, images)
+    private func generate(conversationID id: UUID, request: Request, first: UUID, config: ServerConfig) async {
+        let (model, effort, preferred, systemPrompt, images) = (model, reasoningEffort, preferredEffort, systemPrompt, images)
         var current = first
         var outcome = Outcome.completed
         do {
@@ -613,8 +684,21 @@ public final class ChatStore {
                 case .compact(let focus): Compaction.request(for: history, focus: focus)
                 }
                 if drawing { wire = ImageLabels.annotated(wire, order: ImageLabels.order(of: messages)) }
-                let offer = round < Self.maxToolRounds && !toolless.contains(model) ? tools : []
-                let roundEffort = !offer.isEmpty && toolsNeedNoReasoning.contains(model) ? ReasoningEffort.none : effort
+                let offer = round < Self.maxToolRounds && toolless[model] == nil ? tools : []
+                var roundEffort = effort
+                if request == .reply {
+                    if round < Self.maxToolRounds, !tools.isEmpty, let reason = toolless[model] {
+                        adapt(.toolsDropped(reason: reason), on: current)
+                    }
+                    if !offer.isEmpty, toolsNeedNoReasoning.contains(model), effort != .some(.none) {
+                        roundEffort = ReasoningEffort.none
+                        adapt(.reasoningOffForTools, on: current)
+                    } else if let preferred, preferred != effort {
+                        adapt(.effortChanged(from: preferred, to: effort), on: current)
+                    }
+                }
+                // A summary's request isn't kept: there is no reply to inspect it from.
+                let client = ChatClient(config: config, session: session, record: request == .reply ? recorder(for: current) : nil)
                 let calls = try await streamRound(client, model: model, effort: roundEffort, images: images, wire: wire,
                                                   tools: offer, into: current, request: request)
                 guard !calls.isEmpty, !offer.isEmpty, !Task.isCancelled else { break }
@@ -646,9 +730,14 @@ public final class ChatStore {
                              request: Request) async throws -> [ToolCall] {
         var calls = ToolCallAccumulator()
         let servers = Dictionary(tools.map { ($0.name, $0.serverName) }, uniquingKeysWith: { first, _ in first })
+        let host = client.config.baseURL.host() ?? ""
         do {
             for try await event in client.stream(model: model, messages: wire, reasoningEffort: effort, images: images,
-                                                 tools: tools.map(\.spec)) {
+                                                 tools: tools.map(\.spec), includeUsage: !withoutUsage.contains(host)) {
+                if case .adapted(let adaptation) = event {
+                    if adaptation == .usageNotRequested { withoutUsage.insert(host) }
+                    adapt(adaptation, on: messageID)
+                }
                 guard let reply = liveReply, reply.messageID == messageID else { continue }
                 switch event {
                 case .content(let text): reply.content += text
@@ -668,11 +757,14 @@ public final class ChatStore {
         } catch ChatClientError.http(400, let message) where !tools.isEmpty && liveReply?.content.isEmpty != false {
             if effort != .some(.none), message.localizedCaseInsensitiveContains("reasoning_effort") {
                 toolsNeedNoReasoning.insert(model)
+                adapt(.reasoningOffForTools, on: messageID)
                 return try await streamRound(client, model: model, effort: ReasoningEffort.none, images: images, wire: wire,
                                              tools: tools, into: messageID, request: request)
             }
             // Servers without tool support reject the whole request. Ask again without tools.
-            toolless.insert(model)
+            let reason = ExchangeText.shortened(message)
+            toolless[model] = reason
+            adapt(.toolsDropped(reason: reason), on: messageID)
             return try await streamRound(client, model: model, effort: effort, images: images, wire: wire,
                                          tools: [], into: messageID, request: request)
         }
@@ -730,11 +822,14 @@ public final class ChatStore {
 
         liveReply?.status = sources.isEmpty ? "Generating image…" : "Editing image…"
         defer { liveReply?.status = nil }
-        let client = ChatClient(config: config, session: session)
+        let client = ChatClient(config: config, session: session, record: recorder(for: messageID))
+        let asked = client.imageSize(for: request, source: sources.first)
+        if let asked, request.aspect == nil, request.longEdge == nil {
+            adapt(.imageSize(asked, fromImage: request.sources.first), on: messageID)
+        }
         let bytes: Data
         do {
-            bytes = try await client.image(model: model, prompt: request.prompt, sources: sources,
-                                           size: client.imageSize(for: request, source: sources.first))
+            bytes = try await client.image(model: model, prompt: request.prompt, sources: sources, size: asked)
         } catch {
             return failure("The image server failed: \(error.localizedDescription)")
         }
@@ -781,7 +876,10 @@ public final class ChatStore {
             let keep = message.role == .summary
                 ? outcome == .completed
                 : !(message.content.isEmpty && message.reasoning.isEmpty && message.toolCalls.isEmpty && message.images.isEmpty)
-            if !keep { conversations[c].messages.remove(at: m) }
+            if !keep {
+                if case .failed = outcome { failedReply = messageID } else { exchangeLog.drop([messageID]) }
+                conversations[c].messages.remove(at: m)
+            }
             conversations[c].updatedAt = Date()
         }
         if liveReply?.messageID == messageID { liveReply = nil }

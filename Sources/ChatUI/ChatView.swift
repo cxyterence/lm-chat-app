@@ -13,6 +13,7 @@ struct ChatView: View {
     @FocusState private var composerFocused: Bool
     @State private var atBottom = true
     @State private var following = true
+    @State private var inspecting: InspectedReply?
     @Environment(\.palette) private var palette
 
     private var live: Conversation { store.selectedConversation ?? conversation }
@@ -22,7 +23,9 @@ struct ChatView: View {
         VStack(spacing: 0) {
             messageList
             if let message = store.failureMessage(for: live.id) {
-                ErrorBanner(message: message, retry: store.retry, dismiss: store.dismissFailure)
+                let failed = store.failedReply.flatMap { store.exchanges(for: $0).isEmpty ? nil : $0 }
+                ErrorBanner(message: message, retry: store.retry, dismiss: store.dismissFailure,
+                            inspect: failed.map { id in { inspecting = InspectedReply(id: id) } })
             }
             Composer(draft: $draft, images: $draftImages, store: store.images, focused: $composerFocused, streaming: streaming,
                      canSend: store.canSend, editing: editing != nil, unavailable: store.unavailableReason,
@@ -36,6 +39,7 @@ struct ChatView: View {
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .toolbar { ToolbarItem(placement: .primaryAction) { ModelButton(store: store) } }
+        .sheet(item: $inspecting) { InspectorSheet(store: store, messageID: $0.id).theme(store.theme) }
     }
 
     private var messageList: some View {
@@ -45,9 +49,12 @@ struct ChatView: View {
                     let erased = editing.flatMap { edit in live.messages.firstIndex { $0.id == edit.id } }
                     ForEach(Array(live.messages.enumerated()), id: \.element.id) { index, message in
                         let isLive = streaming && message.id == live.messages.last?.id
+                        let exchanges = store.exchanges(for: message.id)
                         MessageRow(message: message, images: store.images, isStreaming: isLive, reply: isLive ? store.liveReply : nil,
                                    edit: store.canSend ? { beginEditing(message) } : nil,
-                                   approval: isLive ? store.awaitingApproval : nil, resolve: store.resolveApproval)
+                                   approval: isLive ? store.awaitingApproval : nil, resolve: store.resolveApproval,
+                                   stats: ExchangeText.reply(in: exchanges).flatMap { ExchangeText.statsLine($0) },
+                                   inspect: exchanges.isEmpty ? nil : { inspecting = InspectedReply(id: message.id) })
                             .opacity(erased.map { index > $0 } == true ? 0.35 : 1)
                             .transition(.opacity.combined(with: .offset(y: 12)))
                     }
@@ -140,6 +147,10 @@ private struct MessageRow: View {
     /// The tool call in this message waiting to be allowed.
     let approval: String?
     let resolve: (Bool) -> Void
+    /// What the reply's request cost, when its server reported it.
+    let stats: String?
+    /// nil when the reply has no requests to show.
+    let inspect: (() -> Void)?
     @Environment(\.palette) private var palette
 
     var body: some View {
@@ -174,7 +185,8 @@ private struct MessageRow: View {
             }
         case .assistant:
             HStack {
-                AssistantBubble(message: message, images: message.images.map(images.url), isStreaming: isStreaming, reply: reply, approval: approval, resolve: resolve)
+                AssistantBubble(message: message, images: message.images.map(images.url), isStreaming: isStreaming, reply: reply,
+                                approval: approval, resolve: resolve, stats: stats, inspect: inspect)
                 Spacer(minLength: 48)
             }
         case .summary:
@@ -193,6 +205,8 @@ private struct AssistantBubble: View {
     let reply: LiveReply?
     let approval: String?
     let resolve: (Bool) -> Void
+    let stats: String?
+    let inspect: (() -> Void)?
     @State private var thinkingOverride: Bool?
 
     private var content: String { reply?.content ?? message.content }
@@ -250,10 +264,56 @@ private struct AssistantBubble: View {
             } else if content.isEmpty && isStreaming && reasoning.isEmpty && toolCalls.isEmpty {
                 TypingDots().transition(.opacity)
             }
+            if !message.adaptations.isEmpty { Notes(adaptations: message.adaptations) }
+            if !isStreaming, let stats, let inspect { StatsLine(text: stats, action: inspect) }
         }
         .contextMenu {
             if !content.isEmpty { Button("Copy", systemImage: "doc.on.doc") { copyToPasteboard(content) } }
+            if let inspect { Button("Inspect", systemImage: "list.bullet.rectangle", action: inspect) }
         }
+    }
+}
+
+/// What the app changed about the request behind a reply, one quiet line each.
+private struct Notes: View {
+    let adaptations: [Adaptation]
+    @Environment(\.palette) private var palette
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(Array(adaptations.enumerated()), id: \.offset) { _, adaptation in
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Image(systemName: "info.circle").accessibilityHidden(true)
+                    Text(adaptation.note)
+                }
+                .font(.caption)
+                .foregroundStyle(palette.secondaryText)
+                .accessibilityElement(children: .combine)
+            }
+        }
+    }
+}
+
+/// How fast the reply came, as one line. Tap for the requests behind it.
+private struct StatsLine: View {
+    let text: String
+    let action: () -> Void
+    @Environment(\.palette) private var palette
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Text(text).multilineTextAlignment(.leading)
+                Image(systemName: "chevron.right").imageScale(.small).accessibilityHidden(true)
+            }
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(palette.secondaryText)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Request details")
+        .accessibilityValue(text)
+        .accessibilityHint("Shows the requests behind this reply")
     }
 }
 
@@ -614,12 +674,21 @@ private struct ErrorBanner: View {
     let message: String
     let retry: () -> Void
     let dismiss: () -> Void
+    /// nil when no request was kept for the failure.
+    var inspect: (() -> Void)?
     @Environment(\.palette) private var palette
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(palette.danger)
-            Text(message).font(.callout).frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(message).font(.callout)
+                if let inspect {
+                    Button("Inspect request", systemImage: "list.bullet.rectangle", action: inspect)
+                        .font(.callout).buttonStyle(.plain).foregroundStyle(palette.accent)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
             Button("Retry", action: retry).buttonStyle(.bordered)
             Button("Dismiss", systemImage: "xmark", action: dismiss)
                 .labelStyle(.iconOnly).buttonStyle(.plain)

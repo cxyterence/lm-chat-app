@@ -79,6 +79,8 @@ final class StubServer: @unchecked Sendable {
     var authorizations: [(path: String, authorization: String?)] { lock.withLock { credentials } }
     /// Answers requests to /mcp when set.
     nonisolated(unsafe) var mcp: FakeMCP?
+    /// Answers the one-token requests that effort and capability checks send (chat requests that don't stream).
+    nonisolated(unsafe) var probe: (@Sendable ([String: Any]) -> Reply)?
     var root: URL { URL(string: "http://\(host)")! }
 
     /// Bodies of streamed chat requests, oldest first. Title requests are answered "Stub Title" and left out.
@@ -100,6 +102,7 @@ final class StubServer: @unchecked Sendable {
             return search(query)
         }
         if path.hasSuffix("/models"), let models { return (200, models) }
+        if path.hasSuffix("chat/completions"), body["stream"] as? Bool != true, let probe { return probe(body) }
         if path.hasSuffix("images/generations"), let image {
             lock.withLock { drawings.append(body) }
             return image(body)
@@ -120,6 +123,13 @@ func sse(_ chunks: [String]) -> String {
         let event = ["choices": [["index": 0, "delta": ["content": chunk]]]]
         return "data: " + String(decoding: try! JSONSerialization.data(withJSONObject: event), as: UTF8.self) + "\n\n"
     }.joined() + "data: [DONE]\n\n"
+}
+
+/// A chat stream that ends with the token counts, as a server does when asked for `include_usage`.
+func sseWithUsage(_ chunks: [String], prompt: Int, completion: Int) -> String {
+    let counts: [String: Any] = ["choices": [Any](), "usage": ["prompt_tokens": prompt, "completion_tokens": completion]]
+    let usage = "data: " + String(decoding: try! JSONSerialization.data(withJSONObject: counts), as: UTF8.self) + "\n\n"
+    return sse(chunks).replacingOccurrences(of: "data: [DONE]\n\n", with: usage + "data: [DONE]\n\n")
 }
 
 /// The `messages` of a chat request as (role, text) pairs. Image parts are dropped.
@@ -194,6 +204,34 @@ func makeStore(server: StubServer) -> (store: ChatStore, cleanup: @Sendable () -
     store.saveConnection(Connection(name: "stub", baseURL: server.baseURL, model: "m"), apiKey: "")
     return (store, { cleanDefaults(); cleanFile() })
 }
+
+/// A store a test can close and open again on the same saved chats, with `key` as its connection's API key.
+@MainActor
+struct Rig {
+    let store: ChatStore
+    let server: StubServer
+    let connection: Connection
+    private let defaults: UserDefaults
+    private let file: URL
+    private let secrets: Secrets
+    let cleanup: @Sendable () -> Void
+
+    init(server: StubServer, key: String = "") {
+        let (defaults, cleanDefaults) = makeDefaults()
+        let (file, cleanFile) = makeTempFileURL("conversations.json")
+        let secrets = Secrets.memory()
+        let store = ChatStore(defaults: defaults, fileURL: file, secrets: secrets, session: server.session)
+        let connection = Connection(name: "stub", baseURL: server.baseURL, model: "m")
+        store.saveConnection(connection, apiKey: key)
+        (self.store, self.server, self.connection, self.defaults, self.file, self.secrets) = (store, server, connection, defaults, file, secrets)
+        cleanup = { cleanDefaults(); cleanFile() }
+    }
+
+    /// What a new launch would load.
+    func reopened() -> ChatStore { ChatStore(defaults: defaults, fileURL: file, secrets: secrets, session: server.session) }
+}
+
+func jsonObject(_ data: Data) -> [String: Any]? { try? JSONSerialization.jsonObject(with: data) as? [String: Any] }
 
 /// Echoes the last user message, so a test can tell which prompt a reply answered.
 func echoServer() -> StubServer {
