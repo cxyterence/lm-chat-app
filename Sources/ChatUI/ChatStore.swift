@@ -69,6 +69,7 @@ public final class ChatStore {
         static let serperURL = "serperURL"
         static let mcpServers = "mcpServers"
         static let imageTool = "imageTool"
+        static let fetchPages = "fetchPages"
     }
 
     /// Rounds of tool use one reply may take before it must answer with what it has.
@@ -105,6 +106,8 @@ public final class ChatStore {
     private(set) var mcpServers: [MCPServer] = []
     private(set) var mcpStatus: [UUID: MCPStatus] = [:]
     private var savedImageTool: ImageTool?
+    /// Whether `fetch_url` is offered with every reply. Off until the user turns it on.
+    private(set) var fetchesPages: Bool
     /// The tool call waiting for the user to allow or decline it.
     private(set) var awaitingApproval: String?
 
@@ -114,6 +117,7 @@ public final class ChatStore {
     @ObservationIgnored private let fileURL: URL
     @ObservationIgnored let images: ImageStore
     @ObservationIgnored private let session: URLSession
+    @ObservationIgnored private let pages: PageFetcher
     @ObservationIgnored private var mcpClients: [UUID: MCPClient] = [:]
     @ObservationIgnored private var mcpTokens: [UUID: String] = [:]
     @ObservationIgnored private var approvalContinuation: CheckedContinuation<Bool, Never>?
@@ -128,11 +132,13 @@ public final class ChatStore {
         self.init(defaults: .standard, fileURL: ChatStore.defaultFileURL, secrets: .keychain)
     }
 
-    init(defaults: UserDefaults, fileURL: URL, secrets: Secrets, session: URLSession = .shared) {
+    init(defaults: UserDefaults, fileURL: URL, secrets: Secrets, session: URLSession = .shared, pages: PageFetcher = PageFetcher()) {
         self.defaults = defaults
         self.fileURL = fileURL
         self.secrets = secrets
         self.session = session
+        self.pages = pages
+        fetchesPages = defaults.bool(forKey: Keys.fetchPages)
         images = ImageStore(directory: fileURL.deletingLastPathComponent().appendingPathComponent("images"))
         preferredEffort = defaults.string(forKey: Keys.reasoningEffort).flatMap(ReasoningEffort.init(rawValue:))
         theme = defaults.string(forKey: Keys.theme).flatMap(Theme.init(rawValue:)) ?? .system
@@ -194,6 +200,11 @@ public final class ChatStore {
     func setImageTool(_ tool: ImageTool?) {
         savedImageTool = tool
         defaults.set(tool.flatMap { try? JSONEncoder().encode($0) }, forKey: Keys.imageTool)
+    }
+
+    func setFetchesPages(_ on: Bool) {
+        fetchesPages = on
+        defaults.set(on, forKey: Keys.fetchPages)
     }
 
     /// The image models a saved connection serves, listed with that connection's own key.
@@ -353,7 +364,8 @@ public final class ChatStore {
         defaults.set(try? JSONEncoder().encode(mcpServers), forKey: Keys.mcpServers)
     }
 
-    /// Every enabled server's tools, connecting to any not yet listed, then the image tool when one is set up.
+    /// Every enabled server's tools, connecting to any not yet listed, then the image tool when one is set up and
+    /// the page tool when it is turned on.
     /// A server that can't be reached is left out so the reply still happens; Settings shows why.
     private func offeredTools() async -> [ReplyTool] {
         var found: [(MCPServer, MCPClient, [MCPTool])] = []
@@ -371,6 +383,7 @@ public final class ChatStore {
             let config = connection.serverConfig(apiKey: apiKeys[connection.id])
             tools.append(.image(connection: connection.name, config: config, model: tool.model))
         }
+        if fetchesPages { tools.append(.fetch) }
         return tools
     }
 
@@ -772,7 +785,7 @@ public final class ChatStore {
                              wire: [ChatMessage], tools: [ReplyTool], into messageID: UUID,
                              request: Request) async throws -> [ToolCall] {
         var calls = ToolCallAccumulator()
-        let servers = Dictionary(tools.map { ($0.name, $0.serverName) }, uniquingKeysWith: { first, _ in first })
+        let offered = Dictionary(tools.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
         let server = "\(client.config.baseURL.host() ?? ""):\(client.config.baseURL.port ?? 0)"
         do {
             for try await event in client.stream(model: model, messages: wire, reasoningEffort: effort, images: images,
@@ -789,7 +802,7 @@ public final class ChatStore {
                     calls.add(delta)
                     reply.toolCalls = calls.calls.map { call in
                         var call = call
-                        call.server = servers[call.name] ?? ""
+                        call.server = offered[call.name]?.serverName(for: call) ?? ""
                         return call
                     }
                 case .done("length") where request != .reply:
@@ -824,6 +837,9 @@ public final class ChatStore {
             case .image(_, let config, let model)?:
                 // It only adds a picture to this chat, so it doesn't ask.
                 result = await generateImage(call, config: config, model: model, into: messageID, in: id)
+            case .fetch?:
+                // It only reads a public page, like a read-only tool, so it doesn't ask.
+                result = await fetchPage(call, for: messageID)
             case .mcp(let tool)?:
                 if !tool.tool.readOnly, !(await approve(call.id)) {
                     guard !Task.isCancelled else { return }
@@ -840,6 +856,21 @@ public final class ChatStore {
             }
             guard !Task.isCancelled else { return }
             reply.toolCalls[index].result = result
+        }
+    }
+
+    /// Reads the page `fetch_url` was called with. Whatever goes wrong comes back as an error result, which the
+    /// model reads and relays or tries again. The request is kept with the reply that asked for it.
+    private func fetchPage(_ call: ToolCall, for messageID: UUID) async -> ToolCall.Result {
+        liveReply?.status = "Fetching page…"
+        defer { liveReply?.status = nil }
+        do {
+            let request = try FetchRequest.parse(arguments: call.arguments)
+            return .init(text: try await pages.recording(to: recorder(for: messageID)).fetch(request.url).toolResult)
+        } catch let invalid as FetchRequest.Invalid {
+            return .init(text: invalid.message, isError: true)
+        } catch {
+            return .init(text: "The page couldn't be fetched: \(error.localizedDescription)", isError: true)
         }
     }
 

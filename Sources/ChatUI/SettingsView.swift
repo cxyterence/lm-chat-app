@@ -2,7 +2,7 @@ import ChatCore
 import SwiftUI
 
 enum SettingsPage: String, CaseIterable, Identifiable {
-    case connections, apiKeys, mcp, imageTool, appearance
+    case connections, apiKeys, mcp, imageTool, webPages, appearance
 
     var id: Self { self }
     var title: String {
@@ -10,6 +10,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         case .apiKeys: "API Keys"
         case .mcp: "MCP Connections"
         case .imageTool: "Image Generation"
+        case .webPages: "Web Pages"
         default: rawValue.capitalized
         }
     }
@@ -19,6 +20,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         case .apiKeys: "key"
         case .mcp: "point.3.connected.trianglepath.dotted"
         case .imageTool: "photo"
+        case .webPages: "link"
         case .appearance: "paintpalette"
         }
     }
@@ -76,6 +78,7 @@ struct SettingsView: View {
                     case .apiKeys: APIKeysSettings(store: store)
                     case .mcp: MCPSettings(store: store) { path.append($0) }
                     case .imageTool: ImageToolSettings(store: store)
+                    case .webPages: WebPagesSettings(store: store)
                     case .appearance: AppearanceSettings(store: store)
                     }
                 }
@@ -110,6 +113,7 @@ struct SettingsView: View {
         case .apiKeys:
             APIService.allCases.filter { !store.serviceKey($0).isEmpty }.map(\.name).joined(separator: ", ")
         case .imageTool: store.imageTool?.model ?? ""
+        case .webPages: store.fetchesPages ? "On" : "Off"
         case .appearance: store.theme.name
         }
     }
@@ -455,6 +459,26 @@ struct ImageToolSettings: View {
         if store.imageTool?.connectionID != id {
             store.setImageTool(names.first.map { ImageTool(connectionID: id, model: $0) })
         }
+    }
+}
+
+/// Lets chat models read the pages of links, through `fetch_url`.
+struct WebPagesSettings: View {
+    let store: ChatStore
+    @Environment(\.palette) private var palette
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Fetch web pages", isOn: Binding(get: { store.fetchesPages }, set: store.setFetchesPages))
+            } footer: {
+                Text("A chat model that supports tool calling can read a link you paste. Pages are fetched from this device, and the model sees their text.")
+            }
+            .listRowBackground(palette.surface)
+        }
+        .formStyle(.grouped)
+        .foregroundStyle(palette.text)
+        .scrollContentBackground(.hidden)
     }
 }
 

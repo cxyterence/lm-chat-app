@@ -18,7 +18,7 @@ public struct Usage: Equatable, Sendable {
 /// reads `Bearer $API_KEY`.
 public struct Exchange: Identifiable, Sendable, Equatable {
     public enum Purpose: String, Sendable {
-        case chat, image, title, models, probe, resend
+        case chat, image, title, models, probe, resend, fetch
     }
 
     public struct Header: Equatable, Sendable {

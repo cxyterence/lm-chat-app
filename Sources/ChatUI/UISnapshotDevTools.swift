@@ -112,6 +112,20 @@ enum DevToolsSnapshot {
         contextLength: 131_072,
         server: (1...95).map { Fact(name: $0 % 7 == 0 ? "meta.n_vocab_\($0)" : "field_\($0)", value: $0 == 3 ? String(repeating: "a long value ", count: 14) : "\($0 * 128)") })
 
+    /// A chat in which the model read a link, with the tool row it leaves.
+    static func makeFetchStore(defaults: UserDefaults, directory: URL) throws -> ChatStore {
+        let page = "Title: Example Domain\nURL: https://example.com/\n\nThis domain is for use in documentation examples."
+        let call = ToolCall(id: "call_1", name: "fetch_url", arguments: #"{"url":"https://example.com"}"#,
+                            server: "example.com", result: .init(text: page))
+        let conversation = Conversation(title: "What is at example.com?", model: "sample-model", messages: [
+            ChatMessage(role: .user, content: "What is at https://example.com?"),
+            ChatMessage(role: .assistant, content: "", toolCalls: [call]),
+            ChatMessage(role: .assistant, content: "It is the Example Domain page, a placeholder the IANA keeps for use in documentation."),
+        ])
+        try ConversationStore.save([conversation], to: directory.appendingPathComponent("fetch.json"))
+        return ChatStore(defaults: defaults, fileURL: directory.appendingPathComponent("fetch.json"), secrets: .memory())
+    }
+
     static let failedCheck = ChatStore.CapabilityCheck.failed("The server rejected the API key.")
 }
 #endif

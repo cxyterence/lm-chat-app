@@ -1,10 +1,9 @@
 import Foundation
 
-extension ChatClient {
-    /// Where every request the client makes is sent and reported. A call site that goes through here can't
-    /// forget to report, and a request that fails or is cancelled still reports what it had.
-    func capture<T>(_ request: URLRequest, purpose: Exchange.Purpose,
-                    _ work: (inout Exchange) async throws -> T) async -> (outcome: Result<T, Error>, exchange: Exchange) {
+extension Exchange {
+    /// Runs `work` on a request and reports what it did to `record`, once, even when it fails or is cancelled.
+    static func capture<T>(_ request: URLRequest, purpose: Purpose, record: (@Sendable (Exchange) -> Void)?,
+                           _ work: (inout Exchange) async throws -> T) async -> (outcome: Result<T, Error>, exchange: Exchange) {
         var exchange = Exchange(capturing: request, purpose: purpose, startedAt: Date())
         let outcome: Result<T, Error>
         do {
@@ -16,6 +15,15 @@ extension ChatClient {
         exchange.finish(at: Date())
         record?(exchange)
         return (outcome, exchange)
+    }
+}
+
+extension ChatClient {
+    /// Where every request the client makes is sent and reported. A call site that goes through here can't
+    /// forget to report, and a request that fails or is cancelled still reports what it had.
+    func capture<T>(_ request: URLRequest, purpose: Exchange.Purpose,
+                    _ work: (inout Exchange) async throws -> T) async -> (outcome: Result<T, Error>, exchange: Exchange) {
+        await Exchange.capture(request, purpose: purpose, record: record, work)
     }
 
     func captured<T>(_ request: URLRequest, purpose: Exchange.Purpose,

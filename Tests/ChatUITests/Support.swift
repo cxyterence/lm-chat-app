@@ -95,6 +95,15 @@ final class StubServer: @unchecked Sendable {
     /// Answers GET /server_info when set.
     nonisolated(unsafe) var serverInfo: Reply?
     var root: URL { URL(string: "http://\(host)")! }
+    /// Answers GET /page/... with a status, a content type and a body, by path, when set.
+    nonisolated(unsafe) var page: (@Sendable (String) -> (status: Int, type: String, body: String))?
+    private var visited: [URLRequest] = []
+    /// The page requests the app made, oldest first.
+    var pageRequests: [URLRequest] { lock.withLock { visited } }
+    /// The address of a page on this server.
+    func pageURL(_ path: String = "/page/a") -> URL { URL(string: "http://\(host)\(path)")! }
+    /// A page fetcher that reads from this server and does no DNS lookup, since the host name resolves nowhere.
+    var fetcher: PageFetcher { PageFetcher(session: session, resolve: { _ in [] }) }
 
     /// Bodies of streamed chat requests, oldest first. Title requests are answered "Stub Title" and left out.
     var chats: [[String: Any]] { lock.withLock { received } }
@@ -109,6 +118,11 @@ final class StubServer: @unchecked Sendable {
     }
 
     var baseURL: URL { URL(string: "http://\(host)/v1")! }
+
+    fileprivate func answer(page request: URLRequest) -> (status: Int, type: String, body: String)? {
+        lock.withLock { visited.append(request) }
+        return page?(request.url?.path ?? "")
+    }
 
     fileprivate func handle(path: String, method: String?, authorization: String?, body: [String: Any], raw: Data) -> Reply {
         lock.withLock {
@@ -209,6 +223,13 @@ final class StubProtocol: URLProtocol {
                                                                   headerFields: nil)!, cacheStoragePolicy: .notAllowed)
             return client!.urlProtocolDidFinishLoading(self)
         }
+        if request.url?.path.hasPrefix("/page/") == true, let reply = server.answer(page: request) {
+            let response = HTTPURLResponse(url: request.url!, statusCode: reply.status, httpVersion: "HTTP/1.1",
+                                           headerFields: ["Content-Type": reply.type])!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(reply.body.utf8))
+            return client!.urlProtocolDidFinishLoading(self)
+        }
         let raw = Self.body(of: request) ?? Data()
         let body = try? JSONSerialization.jsonObject(with: raw) as? [String: Any]
         if let mcp = server.mcp, request.url?.path.hasPrefix("/mcp") == true {
@@ -252,7 +273,7 @@ final class StubProtocol: URLProtocol {
 func makeStore(server: StubServer) -> (store: ChatStore, cleanup: @Sendable () -> Void) {
     let (defaults, cleanDefaults) = makeDefaults()
     let (file, cleanFile) = makeTempFileURL("conversations.json")
-    let store = ChatStore(defaults: defaults, fileURL: file, secrets: .memory(), session: server.session)
+    let store = ChatStore(defaults: defaults, fileURL: file, secrets: .memory(), session: server.session, pages: server.fetcher)
     store.saveConnection(Connection(name: "stub", baseURL: server.baseURL, model: "m"), apiKey: "")
     return (store, { cleanDefaults(); cleanFile() })
 }
@@ -272,7 +293,7 @@ struct Rig {
         let (defaults, cleanDefaults) = makeDefaults()
         let (file, cleanFile) = makeTempFileURL("conversations.json")
         let secrets = Secrets.memory()
-        let store = ChatStore(defaults: defaults, fileURL: file, secrets: secrets, session: server.session)
+        let store = ChatStore(defaults: defaults, fileURL: file, secrets: secrets, session: server.session, pages: server.fetcher)
         let connection = Connection(name: "stub", baseURL: server.baseURL, model: "m")
         store.saveConnection(connection, apiKey: key)
         (self.store, self.server, self.connection, self.defaults, self.file, self.secrets) = (store, server, connection, defaults, file, secrets)
@@ -280,7 +301,7 @@ struct Rig {
     }
 
     /// What a new launch would load.
-    func reopened() -> ChatStore { ChatStore(defaults: defaults, fileURL: file, secrets: secrets, session: server.session) }
+    func reopened() -> ChatStore { ChatStore(defaults: defaults, fileURL: file, secrets: secrets, session: server.session, pages: server.fetcher) }
 }
 
 func jsonObject(_ data: Data) -> [String: Any]? { try? JSONSerialization.jsonObject(with: data) as? [String: Any] }
@@ -368,9 +389,9 @@ struct LiveChatServer: Sendable {
 
     /// A store set up as saved settings would be on launch, with the server as its one connection.
     @MainActor
-    func makeStore(defaults: UserDefaults, fileURL: URL) throws -> (store: ChatStore, connection: Connection) {
+    func makeStore(defaults: UserDefaults, fileURL: URL, api: WireAPI = .chatCompletions) throws -> (store: ChatStore, connection: Connection) {
         let secrets = Secrets.memory()
-        let connection = Connection(name: "chat", baseURL: try ServerConfig.parse(baseURL: base, apiKey: "").baseURL, model: model)
+        let connection = Connection(name: "chat", baseURL: try ServerConfig.parse(baseURL: base, apiKey: "").baseURL, model: model, api: api)
         secrets.set(connection.secretAccount, key)
         defaults.set(try JSONEncoder().encode([connection]), forKey: "connections")
         defaults.set(connection.id.uuidString, forKey: "activeConnection")

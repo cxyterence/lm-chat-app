@@ -41,6 +41,7 @@ enum ExchangeText {
         case .title: "Title request"
         case .models: "Model list"
         case .probe: "Check request"
+        case .fetch: "Page request"
         }
     }
 

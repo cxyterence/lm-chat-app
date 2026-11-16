@@ -41,7 +41,7 @@ public enum UISnapshot {
     }
 
     /// Every developer-tools screen: a reply with notes and a stats line, the inspector, a request and its response,
-    /// the resend editor, a failed reply with Inspect, and the Check Model pages.
+    /// the resend editor, a failed reply with Inspect, a reply that read a page, and the Check Model pages.
     @MainActor private static func renderDevTools(theme: Theme, appearance: NSAppearance?, defaults: UserDefaults,
                                                   scratch: URL, to directory: URL) async throws {
         func file(_ name: String) -> URL { directory.appendingPathComponent("\(theme.rawValue)-devtools-\(name).png") }
@@ -69,6 +69,9 @@ public enum UISnapshot {
                   size: phone, appearance: appearance, to: file("resend"))
 
         try renderCheckModel(theme: theme, appearance: appearance, store: store, to: directory)
+
+        let fetching = try DevToolsSnapshot.makeFetchStore(defaults: defaults, directory: scratch)
+        try write(RootView(store: fetching), size: chatSize, appearance: appearance, to: file("fetch"))
 
         // A reply that can't reach its server leaves a request with no response, and Inspect on the banner.
         let failing = try await DevToolsSnapshot.makeFailingStore(defaults: defaults, directory: scratch)
