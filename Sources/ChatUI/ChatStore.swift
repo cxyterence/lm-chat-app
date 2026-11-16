@@ -35,6 +35,17 @@ public final class ChatStore {
         case failed(String)
     }
 
+    struct CapabilityKey: Hashable {
+        let connection: UUID
+        let model: String
+    }
+
+    enum CapabilityCheck: Equatable {
+        case running
+        case failed(String)
+        case done(CapabilityReport)
+    }
+
     enum ModelsState: Equatable {
         case idle
         case loading
@@ -89,6 +100,8 @@ public final class ChatStore {
     /// A reply that failed before it showed anything has no message to hang its requests on. They are kept under
     /// this ID, for the failure banner's Inspect, until the failure is dismissed or the reply is asked for again.
     private(set) var failedReply: UUID?
+    /// What Check Model found, per connection and model. Memory only.
+    private(set) var capabilityChecks: [CapabilityKey: CapabilityCheck] = [:]
     private(set) var mcpServers: [MCPServer] = []
     private(set) var mcpStatus: [UUID: MCPStatus] = [:]
     private var savedImageTool: ImageTool?
@@ -207,6 +220,7 @@ public final class ChatStore {
     func deleteConnection(_ id: UUID) {
         guard let connection = connections.first(where: { $0.id == id }) else { return }
         connections.removeAll { $0.id == id }
+        capabilityChecks = capabilityChecks.filter { $0.key.connection != id }
         apiKeys[id] = nil
         secrets.set(connection.secretAccount, "")
         persistConnections()
@@ -603,6 +617,29 @@ public final class ChatStore {
             .first { address.hasPrefix($0.baseURL.absoluteString) }
         guard let connection else { return ServerConfig(baseURL: exchange.url) }
         return ServerConfig(baseURL: connection.baseURL, apiKey: apiKeys[connection.id])
+    }
+
+    /// Asks a connection's selected model what it supports. When that is the active connection's model, what the
+    /// report finds about tools is remembered, so the first real request doesn't have to fail to learn it.
+    func checkCapabilities(of connectionID: UUID) async {
+        guard let connection = connections.first(where: { $0.id == connectionID }), !connection.model.isEmpty else { return }
+        let key = CapabilityKey(connection: connectionID, model: connection.model)
+        guard capabilityChecks[key] != .running else { return }
+        capabilityChecks[key] = .running
+        let client = ChatClient(config: ServerConfig(baseURL: connection.baseURL, apiKey: apiKeys[connectionID]), session: session)
+        do {
+            let report = try await client.capabilities(model: connection.model)
+            capabilityChecks[key] = .done(report)
+            if connectionID == activeConnectionID, connection.model == model {
+                switch report.tools {
+                case .onlyWithReasoningOff: toolsNeedNoReasoning.insert(model)
+                case .no(let reason): toolless[model] = ExchangeText.shortened(reason)
+                case .yes, .unknown: break
+                }
+            }
+        } catch {
+            capabilityChecks[key] = .failed(error.localizedDescription)
+        }
     }
 
     // MARK: Commands

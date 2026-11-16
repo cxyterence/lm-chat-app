@@ -104,5 +104,14 @@ enum DevToolsSnapshot {
         for _ in 0..<200 where store.isBusy { try await Task.sleep(for: .milliseconds(50)) }
         return store
     }
+
+    static let report = CapabilityReport(
+        tools: .onlyWithReasoningOff,
+        vision: .no(reason: "Invalid content type. image_url is only supported by certain models."),
+        efforts: [.none, .low, .medium],
+        contextLength: 131_072,
+        server: (1...95).map { Fact(name: $0 % 7 == 0 ? "meta.n_vocab_\($0)" : "field_\($0)", value: $0 == 3 ? String(repeating: "a long value ", count: 14) : "\($0 * 128)") })
+
+    static let failedCheck = ChatStore.CapabilityCheck.failed("The server rejected the API key.")
 }
 #endif

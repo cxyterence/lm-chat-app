@@ -81,6 +81,8 @@ final class StubServer: @unchecked Sendable {
     nonisolated(unsafe) var mcp: FakeMCP?
     /// Answers the one-token requests that effort and capability checks send (chat requests that don't stream).
     nonisolated(unsafe) var probe: (@Sendable ([String: Any]) -> Reply)?
+    /// Answers GET /server_info when set.
+    nonisolated(unsafe) var serverInfo: Reply?
     var root: URL { URL(string: "http://\(host)")! }
 
     /// Bodies of streamed chat requests, oldest first. Title requests are answered "Stub Title" and left out.
@@ -102,6 +104,7 @@ final class StubServer: @unchecked Sendable {
             return search(query)
         }
         if path.hasSuffix("/models"), let models { return (200, models) }
+        if path.hasSuffix("/server_info"), let serverInfo { return serverInfo }
         if path.hasSuffix("chat/completions"), body["stream"] as? Bool != true, let probe { return probe(body) }
         if path.hasSuffix("images/generations"), let image {
             lock.withLock { drawings.append(body) }
@@ -296,6 +299,33 @@ struct LiveServers: Sendable {
         defaults.set(chat.id.uuidString, forKey: "activeConnection")
         defaults.set(try JSONEncoder().encode(ImageTool(connectionID: image.id, model: imageModel)), forKey: "imageTool")
         return ChatStore(defaults: defaults, fileURL: fileURL, secrets: secrets)
+    }
+}
+
+/// A real chat server for the live developer-tools test, read from the environment. Nil unless all three are set.
+struct LiveChatServer: Sendable {
+    let base, key, model: String
+    /// Where the test writes what it finds, when `LIVE_OUT_DIR` is set.
+    let outDirectory: URL?
+
+    static let current: LiveChatServer? = {
+        let env = ProcessInfo.processInfo.environment
+        guard let base = env["LIVE_CHAT_BASE"], let key = env["LIVE_CHAT_KEY"], let model = env["LIVE_CHAT_MODEL"],
+              ![base, model].contains(where: \.isEmpty)
+        else { return nil }
+        return LiveChatServer(base: base, key: key, model: model,
+                              outDirectory: env["LIVE_OUT_DIR"].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) })
+    }()
+
+    /// A store set up as saved settings would be on launch, with the server as its one connection.
+    @MainActor
+    func makeStore(defaults: UserDefaults, fileURL: URL) throws -> (store: ChatStore, connection: Connection) {
+        let secrets = Secrets.memory()
+        let connection = Connection(name: "chat", baseURL: try ServerConfig.parse(baseURL: base, apiKey: "").baseURL, model: model)
+        secrets.set(connection.secretAccount, key)
+        defaults.set(try JSONEncoder().encode([connection]), forKey: "connections")
+        defaults.set(connection.id.uuidString, forKey: "activeConnection")
+        return (ChatStore(defaults: defaults, fileURL: fileURL, secrets: secrets), connection)
     }
 }
 

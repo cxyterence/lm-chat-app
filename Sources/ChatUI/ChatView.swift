@@ -1096,7 +1096,7 @@ private struct EffortSlider: View {
     }
 }
 
-private extension ReasoningEffort {
+extension ReasoningEffort {
     var label: String {
         switch self {
         case .none: "Off"

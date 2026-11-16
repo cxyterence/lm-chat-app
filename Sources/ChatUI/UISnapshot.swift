@@ -41,7 +41,7 @@ public enum UISnapshot {
     }
 
     /// Every developer-tools screen: a reply with notes and a stats line, the inspector, a request and its response,
-    /// the resend editor, and a failed reply with Inspect.
+    /// the resend editor, a failed reply with Inspect, and the Check Model pages.
     @MainActor private static func renderDevTools(theme: Theme, appearance: NSAppearance?, defaults: UserDefaults,
                                                   scratch: URL, to directory: URL) async throws {
         func file(_ name: String) -> URL { directory.appendingPathComponent("\(theme.rawValue)-devtools-\(name).png") }
@@ -68,12 +68,36 @@ public enum UISnapshot {
         try write(ResendEditor(text: sample.worked.displayBody, cancel: {}, send: { _ in }).theme(theme),
                   size: phone, appearance: appearance, to: file("resend"))
 
+        try renderCheckModel(theme: theme, appearance: appearance, store: store, to: directory)
+
         // A reply that can't reach its server leaves a request with no response, and Inspect on the banner.
         let failing = try await DevToolsSnapshot.makeFailingStore(defaults: defaults, directory: scratch)
         try write(RootView(store: failing), size: chatSize, appearance: appearance, to: file("failed"))
         if let id = failing.failedReply {
             try write(InspectorSheet(store: failing, messageID: id).theme(theme), size: phone, appearance: appearance, to: file("inspector-failed"))
         }
+    }
+
+    /// A connection's page with its Check Model row, then the report page with results, with details open, running and failed.
+    @MainActor private static func renderCheckModel(theme: Theme, appearance: NSAppearance?, store: ChatStore, to directory: URL) throws {
+        func file(_ name: String) -> URL { directory.appendingPathComponent("\(theme.rawValue)-devtools-\(name).png") }
+        let phone = DevToolsSnapshot.phone
+        if let id = store.connections.first?.id {
+            try write(NavigationStack { ConnectionEditor(store: store, route: .edit(id)).background(theme.palette.groupedBackground) }.theme(theme),
+                      size: phone, appearance: appearance, to: file("connection"))
+        }
+        let report = DevToolsSnapshot.report
+        func page(_ check: ChatStore.CapabilityCheck?, open: Bool = false) -> some View {
+            NavigationStack {
+                CapabilityReportPage(model: "gpt-6-luna", check: check, isActive: true, detailsOpen: open, run: {})
+                    .background(theme.palette.groupedBackground)
+            }
+            .theme(theme)
+        }
+        try write(page(.done(report)), size: phone, appearance: appearance, to: file("check"))
+        try write(page(.done(report), open: true), size: phone, appearance: appearance, to: file("check-details"))
+        try write(page(DevToolsSnapshot.failedCheck), size: phone, appearance: appearance, to: file("check-failed"))
+        try write(page(.running), size: phone, appearance: appearance, to: file("check-running"))
     }
 
     private static var sampleConversation: Conversation {

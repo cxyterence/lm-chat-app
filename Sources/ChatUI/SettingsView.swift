@@ -35,6 +35,8 @@ enum MCPRoute: Hashable {
 enum ConnectionRoute: Hashable {
     case new
     case edit(UUID)
+    /// The Check Model page of a saved connection.
+    case check(UUID)
 }
 
 struct SettingsView: View {
@@ -85,8 +87,14 @@ struct SettingsView: View {
                     .background(palette.groupedBackground)
             }
             .navigationDestination(for: ConnectionRoute.self) { route in
-                ConnectionEditor(store: store, route: route)
-                    .background(palette.groupedBackground)
+                Group {
+                    if case .check(let id) = route {
+                        CapabilityReportView(store: store, connectionID: id)
+                    } else {
+                        ConnectionEditor(store: store, route: route)
+                    }
+                }
+                .background(palette.groupedBackground)
             }
         }
         #if os(macOS)
@@ -252,7 +260,19 @@ struct ConnectionEditor: View {
             }
             .listRowBackground(palette.surface)
 
-            if existing != nil {
+            if let existing {
+                Section {
+                    NavigationLink(value: ConnectionRoute.check(existing.id)) {
+                        LabeledContent("Check Model") {
+                            Text(existing.model.isEmpty ? "No model" : existing.model)
+                                .foregroundStyle(palette.secondaryText).lineLimit(1).truncationMode(.middle)
+                        }
+                    }
+                } footer: {
+                    Text("Finds out whether the model takes tools and pictures, and which reasoning levels it accepts.")
+                }
+                .listRowBackground(palette.surface)
+
                 Section {
                     Button("Delete Connection", role: .destructive) { confirmingDelete = true }
                 }

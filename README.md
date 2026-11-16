@@ -57,6 +57,8 @@ Edit and Resend opens the request body in a plain text editor. Send posts it to 
 
 When the app changes a request for you, the reply says so in a caption under it. Tools are left out when the server refuses them, and stay out of later replies from that model until you quit the app. Reasoning is turned off when the model takes tools only that way. A reasoning level is swapped when the model doesn't take the one you picked. A size is noted when the app chose it for an image edit. Token counts are not asked for when the server refuses `stream_options`. These notes are saved with the chat.
 
+Settings › Connections › a connection › Check Model asks that connection's chosen model what it supports when you tap Run Check, with a handful of one-token requests. It reports tools (yes, no, or only with reasoning off), vision, the reasoning levels it takes, and the context length when the server says. A Server details list holds what the model list entry and SGLang's `/server_info` add, leaving out anything named like a key. A no or unknown comes with the server's own words. The result stays until you quit the app. For the connection in use, a result of no tools, or tools only with reasoning off, is used at once, so the first real request doesn't have to fail to find out.
+
 ## chatcli
 
 ```sh
@@ -90,4 +92,6 @@ scripts/test.sh       # with Command Line Tools only
 python3 scripts/mock_openai_server.py --port 8099
 ```
 
-`scripts/live_test.sh` drives the real `ChatStore` against a real chat model and a real image model. It asks for a red fox in snow, widescreen, then for it at night, and checks that two pictures come back, the first wider than tall, and that the second call edits image 1. Set `LIVE_CHAT_BASE`, `LIVE_CHAT_KEY`, `LIVE_CHAT_MODEL`, `LIVE_IMAGE_BASE`, `LIVE_IMAGE_KEY` and `LIVE_IMAGE_MODEL` in `.env` or the shell, and `LIVE_OUT_DIR` to keep the pictures. Without all six the test is skipped.
+`scripts/live_test.sh LiveDevToolsTests` drives the real `ChatStore` against a real chat model. It sends a short prompt and checks that the reply kept a 200 request with token counts and a first-token time under the total time, and that the key is nowhere in it. It writes the request's curl command, resends it with the prompt changed to ask for the word PINEAPPLE, checks the answer and that the chat is unchanged, and writes the Check Model report as text. It needs only `LIVE_CHAT_BASE`, `LIVE_CHAT_KEY` and `LIVE_CHAT_MODEL`, and `LIVE_OUT_DIR` keeps `request.curl.sh` and `capabilities.txt`.
+
+`scripts/live_test.sh` alone drives the real `ChatStore` against a real chat model and a real image model. It asks for a red fox in snow, widescreen, then for it at night, and checks that two pictures come back, the first wider than tall, and that the second call edits image 1. Set `LIVE_CHAT_BASE`, `LIVE_CHAT_KEY`, `LIVE_CHAT_MODEL`, `LIVE_IMAGE_BASE`, `LIVE_IMAGE_KEY` and `LIVE_IMAGE_MODEL` in `.env` or the shell, and `LIVE_OUT_DIR` to keep the pictures. Without all six the test is skipped.
