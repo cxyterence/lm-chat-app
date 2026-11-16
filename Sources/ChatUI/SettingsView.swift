@@ -481,7 +481,7 @@ struct WebPagesSettings: View {
             Section {
                 Toggle("Fetch web pages", isOn: Binding(get: { store.fetchesPages }, set: store.setFetchesPages))
             } footer: {
-                Text("A chat model that supports tool calling can read a link you paste. Pages are fetched from this device, and the model sees their text.")
+                Text("A chat model that supports tool calling can read a link you paste. Pages are fetched from this device, and the model sees their text. It asks before reading an address you didn't give it.")
             }
             .listRowBackground(palette.surface)
         }

@@ -115,8 +115,9 @@ enum DevToolsSnapshot {
     /// A chat in which the model read a link, with the tool row it leaves.
     static func makeFetchStore(defaults: UserDefaults, directory: URL) throws -> ChatStore {
         let page = "Title: Example Domain\nURL: https://example.com/\n\nThis domain is for use in documentation examples."
-        let call = ToolCall(id: "call_1", name: "fetch_url", arguments: #"{"url":"https://example.com"}"#,
-                            server: "example.com", result: .init(text: page))
+        let address = "https://example.com/docs/reference/introduction?utm_source=chat&section=overview"
+        let call = ToolCall(id: "call_1", name: "fetch_url", arguments: #"{"url":"\#(address)"}"#,
+                            server: address, result: .init(text: page))
         let conversation = Conversation(title: "What is at example.com?", model: "sample-model", messages: [
             ChatMessage(role: .user, content: "What is at https://example.com?"),
             ChatMessage(role: .assistant, content: "", toolCalls: [call]),

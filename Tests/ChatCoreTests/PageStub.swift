@@ -31,9 +31,9 @@ final class PageStub: @unchecked Sendable {
         return URLSession(configuration: configuration)
     }
 
-    /// A fetcher that does no DNS lookups, since the stub's host name resolves nowhere.
+    /// A fetcher that does no DNS lookups and finds every name at a public address, since the stub's host name resolves nowhere.
     func fetcher(record: (@Sendable (Exchange) -> Void)? = nil,
-                 resolve: @escaping @Sendable (String) async -> [String] = { _ in [] }) -> PageFetcher {
+                 resolve: @escaping @Sendable (String) async -> [String] = { _ in ["93.184.216.34"] }) -> PageFetcher {
         PageFetcher(session: session, record: record, resolve: resolve)
     }
 

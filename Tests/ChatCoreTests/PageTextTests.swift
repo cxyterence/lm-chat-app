@@ -51,4 +51,35 @@ struct PageTextTests {
         #expect(PageText.extract(fromHTML: "<p>x</p>").title == nil)
         #expect(PageText.extract(fromHTML: "<title>  </title><p>x</p>").title == nil)
     }
+
+    @Test func aHugeRunOfSpacesInAPreConvertsInUnderASecond() {
+        let started = ContinuousClock.now
+        let page = PageText.extract(fromHTML: "<pre>" + String(repeating: " ", count: 200_000) + "x</pre>")
+        #expect(ContinuousClock.now - started < .seconds(1), "took \(ContinuousClock.now - started)")
+        #expect(page.text.hasSuffix("x") && page.text.count == 200_001)
+    }
+
+    @Test func trailingSpacesAreTrimmedFromEveryLineButNotTheMiddle() {
+        let page = PageText.extract(fromHTML: "<pre>a  b   \n\t\n  c \t</pre>")
+        #expect(page.text == "a  b\n\n  c")
+    }
+
+    @Test func aTitleThatIsNeverClosedIsCutToThreeHundredCharacters() {
+        let page = PageText.extract(fromHTML: "<title>" + String(repeating: "word ", count: 2_000) + "<p>rest</p>")
+        #expect(page.title?.count == 300)
+        #expect(PageText.extract(fromHTML: "<title>" + String(repeating: "a", count: 300) + "</title>").title?.count == 300)
+        #expect(PageText.extract(fromHTML: "<title>" + String(repeating: "a", count: 301) + "</title>").title?.count == 300)
+    }
+
+    @Test func aHeadThatIsNeverClosedEndsAtTheFirstTagThatIsNotForTheHead() {
+        let page = PageText.extract(fromHTML: "<html><head><title>Docs</title><meta charset=utf-8><link rel=x href=y>stray<h1>Intro</h1><p>Body text.</p>")
+        #expect(page.title == "Docs")
+        #expect(page.text == "Intro\n\nBody text.")
+    }
+
+    @Test func aQuoteInsideAnUnquotedAttributeDoesNotSwallowThePage() {
+        #expect(PageText.extract(fromHTML: "<p>before</p><img alt=Don't src=x><p>after</p>").text == "before\n\nafter")
+        #expect(PageText.extract(fromHTML: "<a title=it's href=x>link</a> <p>more</p>").text == "link\n\nmore")
+        #expect(PageText.extract(fromHTML: "<a title = \"a > b\" href='c > d'>link</a>").text == "link")
+    }
 }

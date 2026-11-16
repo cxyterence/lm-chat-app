@@ -48,6 +48,10 @@ struct FetchTests {
         "http://[::ffff:127.0.0.1]/", "http://[::ffff:10.0.0.1]/", "http://[64:ff9b::a00:1]/",
         "http://2130706433/", "http://0x7f000001/", "http://0x7f.0.0.1/", "http://017700000001/", "http://127.1/",
         "http://167772161/", "http://3232235777/", "http://2852039166/",
+        "http://100.64.0.1/", "http://100.100.100.100/", "http://100.127.255.255/", "http://1681915905/",
+        "http://[::ffff:0:a00:1]/", "http://[::ffff:0:7f00:1]/", "http://[::ffff:0:6440:1]/",
+        "http://[2002:a00:1::1]/", "http://[2002:7f00:1::]/", "http://[2002:c0a8:101::1]/", "http://[2002:6464:6464::1]/",
+        "http://[fec0::1]/", "http://[feff::1]/", "http://[64:ff9b:1::1]/", "http://[64:ff9b:1:ffff::]/",
     ]) func localAndPrivateHostsAreRefused(address: String) {
         #expect(refusal(address)?.contains("private network") == true, "\(address) should be refused")
     }
@@ -56,12 +60,42 @@ struct FetchTests {
         "https://example.com/", "http://8.8.8.8/", "http://172.15.0.1/", "http://172.32.0.1/", "http://192.169.0.1/",
         "http://11.0.0.1/", "http://169.253.0.1/", "http://[2606:4700::1111]/", "https://localhost.example.com/",
         "https://notlocal.com/", "https://internal.example.com/", "http://134744072/",
+        "http://100.63.255.255/", "http://100.128.0.1/", "http://198.18.0.1/",
+        "http://[2002:808:808::1]/", "http://[::ffff:0:808:808]/", "http://[64:ff9b::808:808]/", "http://[64:ff9a::1]/",
     ]) func publicAddressesAreAllowed(address: String) {
         #expect(refusal(address) == nil, "\(address) should be allowed, got \(refusal(address) ?? "")")
     }
 
     @Test func aRefusalNamesTheHostSoTheModelCanTellTheUser() {
         #expect(refusal("http://192.168.1.1/admin")?.hasPrefix("192.168.1.1 is on this device or a private network") == true)
+    }
+
+    // MARK: Whether the user gave the address
+
+    private func named(_ address: String, in texts: String...) -> Bool {
+        FetchRequest.isNamed(URL(string: address)!, in: texts)
+    }
+
+    @Test func aHostTheUserWroteIsOneTheyGave() {
+        #expect(named("https://example.com/a?b=1", in: "What does https://example.com/x say?"))
+        #expect(named("https://example.com/", in: "Example.COM is down for me"))
+        #expect(named("https://example.com/", in: "see example.com."))
+        #expect(named("https://example.com/", in: "(example.com), right?"))
+        #expect(named("https://example.com/", in: "http://example.com:8080/x"))
+        #expect(named("https://93.184.216.34/", in: "fetch 93.184.216.34/index"))
+        #expect(named("https://example.com/", in: "nothing here", "and then example.com"))
+    }
+
+    @Test func aHostThatOnlyLooksLikeOneTheUserWroteIsNot() {
+        #expect(!named("https://example.com/", in: "notexample.com"))
+        #expect(!named("https://example.com/", in: "example.com.evil.net"))
+        #expect(!named("https://example.com/", in: "evil-example.com"))
+        #expect(!named("https://example.com/", in: "example.community"))
+        #expect(!named("https://example.com/", in: "www.example.com"))
+        #expect(!named("https://www.example.com/", in: "example.com"))
+        #expect(!named("https://evil.example/?q=example.com", in: "example.com is fine"))
+        #expect(!named("https://example.com/", in: "nothing to see"))
+        #expect(!FetchRequest.isNamed(URL(string: "https://example.com/")!, in: []))
     }
 
     // MARK: HTML to a page
@@ -87,6 +121,7 @@ struct FetchTests {
         #expect(request.httpShouldHandleCookies == false)
         let session = PageFetcher.privateSession().configuration
         #expect(session.httpCookieStorage == nil && session.urlCredentialStorage == nil && session.urlCache == nil)
+        #expect(session.timeoutIntervalForResource == 30, "a server that drips bytes can't hold a fetch open")
     }
 
     @Test func textJSONAndXMLPassThroughUntouched() async throws {
@@ -112,7 +147,7 @@ struct FetchTests {
                                 ("image/png", "That address is an image, not a page of text."),
                                 ("video/mp4", "That address is a video, not a page of text."),
                                 ("application/octet-stream", "That address is a binary file, not a page of text."),
-                                ("application/x-shockwave-flash", "That address is a application/x-shockwave-flash file, not a page of text.")] {
+                                ("application/x-shockwave-flash", "That address is not a page of text (application/x-shockwave-flash).")] {
             let stub = PageStub(.page(type: type, body: Data([0, 1, 2])))
             await #expect(throws: FetchRequest.Invalid(message), "\(type)") { try await stub.fetcher().fetch(stub.url()) }
         }
@@ -151,6 +186,16 @@ struct FetchTests {
 
         let short = Page(url: URL(string: "https://example.com/")!, title: nil, text: String(repeating: "x", count: 100))
         #expect(short.toolResult == "URL: https://example.com/\n\n" + String(repeating: "x", count: 100))
+    }
+
+    @Test func theLimitCoversTheHeaderToo() async throws {
+        let note = "\n\n[The page was cut off here. It has more text than fits.]"
+        let huge = Page(url: URL(string: "https://example.com/")!, title: String(repeating: "t", count: 2_000_000), text: "body")
+        #expect(huge.toolResult.count == Page.characterLimit + note.count && huge.toolResult.hasSuffix(note))
+
+        let stub = PageStub(.html("<title>" + String(repeating: "a", count: 100_000) + "<p>never reached</p>"))
+        let result = try await stub.fetcher().fetch(stub.url()).toolResult
+        #expect(result.count < 1_000, "an unclosed title is cut to its own limit, got \(result.count) characters")
     }
 
     // MARK: Safety on the way
@@ -207,9 +252,39 @@ struct FetchTests {
     @Test func aRedirectTargetThatResolvesToAPrivateAddressIsRefusedToo() async throws {
         let target = PageStub(.html("secret"))
         let stub = PageStub { _ in .redirect(to: target.url().absoluteString) }
-        let fetcher = stub.fetcher(resolve: { $0 == target.host ? ["fe80::1%en0"] : [] })
+        let fetcher = stub.fetcher(resolve: { $0 == target.host ? ["fe80::1%en0"] : ["93.184.216.34"] })
         await #expect(throws: FetchRequest.Invalid.self) { try await fetcher.fetch(stub.url()) }
         #expect(target.requests.isEmpty)
+    }
+
+    @Test func aNameThatResolvesToNothingIsRefusedBeforeAnythingIsSent() async throws {
+        let stub = PageStub(.html("secret"))
+        let error = await #expect(throws: FetchRequest.Invalid.self) { try await stub.fetcher(resolve: { _ in [] }).fetch(stub.url()) }
+        #expect(error?.message == "No server was found for \(stub.host).")
+        #expect(stub.requests.isEmpty)
+    }
+
+    @Test func aRedirectToANameThatResolvesToNothingIsRefusedToo() async throws {
+        let target = PageStub(.html("secret"))
+        let stub = PageStub { _ in .redirect(to: target.url().absoluteString) }
+        let fetcher = stub.fetcher(resolve: { $0 == target.host ? [] : ["93.184.216.34"] })
+        await #expect(throws: FetchRequest.Invalid.self) { try await fetcher.fetch(stub.url()) }
+        #expect(target.requests.isEmpty)
+    }
+
+    @Test func aConnectionToAPrivateAddressMeansTheBodyIsNotReturned() {
+        let message = { (address: String) in "The connection went to \(address), which is on this device or a private network, so the page was not read." }
+        #expect(PageFetcher.refusal(connectedTo: "127.0.0.1", viaProxy: false) == message("127.0.0.1"))
+        #expect(PageFetcher.refusal(connectedTo: "100.100.100.100", viaProxy: false) == message("100.100.100.100"))
+        #expect(PageFetcher.refusal(connectedTo: "fe80::1%en0", viaProxy: false) == message("fe80::1%en0"))
+        #expect(PageFetcher.refusal(connectedTo: "::ffff:10.0.0.1", viaProxy: false) == message("::ffff:10.0.0.1"))
+    }
+
+    @Test func aPublicOrUnknownOrProxiedConnectionIsFine() {
+        #expect(PageFetcher.refusal(connectedTo: "93.184.216.34", viaProxy: false) == nil)
+        #expect(PageFetcher.refusal(connectedTo: "2606:4700::1111", viaProxy: false) == nil)
+        #expect(PageFetcher.refusal(connectedTo: nil, viaProxy: false) == nil, "nothing to judge")
+        #expect(PageFetcher.refusal(connectedTo: "127.0.0.1", viaProxy: true) == nil, "that is the proxy's address, not the page's")
     }
 
     @Test func theSystemResolverFindsLocalhostAndGivesNothingForANameThatDoesNotExist() async {

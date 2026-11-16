@@ -79,12 +79,21 @@ enum ReplyTool {
         }
     }
 
-    /// Shown beside `call`: the MCP server's name, the image connection's, or the host of the page.
+    /// Shown beside `call`: the MCP server's name, the image connection's, or the address of the page.
     func serverName(for call: ToolCall) -> String {
         switch self {
         case .mcp(let tool): tool.server.name
         case .image(let connection, _, _): connection
-        case .fetch: FetchRequest.address(in: call.arguments).flatMap { URL(string: $0)?.host(percentEncoded: false) } ?? ""
+        case .fetch: FetchRequest.address(in: call.arguments)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         }
+    }
+}
+
+extension ToolCall {
+    /// What to ask before running this call, and the address it would read when it is a fetch. The address is
+    /// shown whole, since a page can hide what it wants sent away at the end of one.
+    var approval: (question: String, address: String?) {
+        guard name == FetchRequest.toolName else { return ("This tool can make changes. Run it?", nil) }
+        return ("The model wants to read a page you didn't mention. Read it?", FetchRequest.address(in: arguments) ?? server)
     }
 }

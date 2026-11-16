@@ -49,6 +49,18 @@ public struct FetchRequest: Equatable, Sendable {
         return isPrivate(host: host) ? "\(host) is on this device or a private network, so it can't be fetched." : nil
     }
 
+    /// Whether the user wrote the host of `url` in one of `texts`, as a word of its own. A fetch of such an address is
+    /// the user's own request. A page can ask for any other address, such as one that carries their chat in its query.
+    public static func isNamed(_ url: URL, in texts: [String]) -> Bool {
+        guard var host = url.host(percentEncoded: false)?.lowercased() else { return false }
+        while host.hasSuffix(".") { host.removeLast() }
+        return texts.contains { text in
+            text.lowercased()
+                .split { !($0.isLetter || $0.isNumber || $0 == "." || $0 == "-") }
+                .contains { $0.trimmingCharacters(in: CharacterSet(charactersIn: ".-")) == host }
+        }
+    }
+
     /// A name or numeric address that points at this device or a private network. IPv4 is read the way
     /// `getaddrinfo` reads it, so `2130706433`, `0x7f000001` and `127.1` count as 127.0.0.1.
     static func isPrivate(host raw: String) -> Bool {
@@ -65,18 +77,26 @@ public struct FetchRequest: Equatable, Sendable {
         guard inet_pton(AF_INET6, host, &v6) == 1 else { return false }
         let bytes = withUnsafeBytes(of: v6) { Array($0) }
         if bytes.allSatisfy({ $0 == 0 }) || bytes[0] == 0xFF { return true }
-        if bytes[0] & 0xFE == 0xFC || (bytes[0] == 0xFE && bytes[1] & 0xC0 == 0x80) { return true }
-        // IPv4 carried inside IPv6: mapped (::ffff:a.b.c.d), compatible (::a.b.c.d) and NAT64 (64:ff9b::a.b.c.d).
+        // Unique local (fc00::/7), and link-local (fe80::/10) with the deprecated site-local (fec0::/10).
+        if bytes[0] & 0xFE == 0xFC || (bytes[0] == 0xFE && bytes[1] & 0xC0 >= 0x80) { return true }
+        // Local-use NAT64 (64:ff9b:1::/48) is meant for a private network.
+        if bytes[..<6] == [0, 0x64, 0xFF, 0x9B, 0, 1] { return true }
+        // IPv4 carried inside IPv6: mapped (::ffff:a.b.c.d), compatible (::a.b.c.d), translated (::ffff:0:a.b.c.d),
+        // NAT64 (64:ff9b::a.b.c.d) and 6to4 (2002:a.b.c.d::).
         let embedded = bytes[12...].reduce(UInt32(0)) { $0 << 8 | UInt32($1) }
         let leadingZeros = bytes[..<10].allSatisfy { $0 == 0 }
         if leadingZeros && (bytes[10...11] == [0xFF, 0xFF] || bytes[10...11] == [0, 0]) { return isPrivate(v4: embedded) }
+        if bytes[..<8].allSatisfy({ $0 == 0 }) && bytes[8...11] == [0xFF, 0xFF, 0, 0] { return isPrivate(v4: embedded) }
         if bytes[..<12] == [0, 0x64, 0xFF, 0x9B, 0, 0, 0, 0, 0, 0, 0, 0] { return isPrivate(v4: embedded) }
+        if bytes[0] == 0x20, bytes[1] == 0x02 { return isPrivate(v4: bytes[2...5].reduce(UInt32(0)) { $0 << 8 | UInt32($1) }) }
         return false
     }
 
     private static func isPrivate(v4 address: UInt32) -> Bool {
         let (a, b) = (address >> 24, address >> 16 & 0xFF)
-        return a == 0 || a == 10 || a == 127 || (a == 169 && b == 254) || (a == 172 && (16...31).contains(b)) || (a == 192 && b == 168)
+        // 100.64.0.0/10 is carrier-grade NAT, which Tailscale also uses for its devices.
+        return a == 0 || a == 10 || a == 127 || (a == 100 && (64...127).contains(b)) || (a == 169 && b == 254)
+            || (a == 172 && (16...31).contains(b)) || (a == 192 && b == 168)
     }
 }
 

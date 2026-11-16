@@ -339,7 +339,7 @@ private struct GeneratedImage: View {
 }
 
 /// One tool the model called: what it ran, how it went, and on tap the arguments and result.
-private struct ToolCallRow: View {
+struct ToolCallRow: View {
     let call: ToolCall
     let running: Bool
     let awaiting: Bool
@@ -358,6 +358,7 @@ private struct ToolCallRow: View {
                         + Text(call.name).foregroundStyle(palette.text))
                         .font(.callout.monospaced())
                         .lineLimit(1)
+                        .truncationMode(.middle)
                     Spacer(minLength: 4)
                     state
                 }
@@ -369,7 +370,14 @@ private struct ToolCallRow: View {
 
             if awaiting {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("This tool can make changes. Run it?").font(.caption).foregroundStyle(palette.secondaryText)
+                    let ask = call.approval
+                    Text(ask.question).font(.caption).foregroundStyle(palette.secondaryText)
+                    if let address = ask.address {
+                        Text(address)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(palette.text)
+                            .textSelection(.enabled)
+                    }
                     HStack(spacing: 8) {
                         Button("Allow") { resolve(true) }
                             .buttonStyle(.borderedProminent).tint(palette.accent)

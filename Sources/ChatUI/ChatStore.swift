@@ -871,7 +871,8 @@ public final class ChatStore {
         return liveReply?.toolCalls ?? []
     }
 
-    /// Runs each call in turn, asking first for any MCP tool that isn't read-only. Results show as they land.
+    /// Runs each call in turn, asking first for any MCP tool that isn't read-only and for a page the user didn't link.
+    /// Results show as they land.
     private func runTools(_ offered: [ReplyTool], for messageID: UUID, in id: UUID) async {
         guard let reply = liveReply, reply.messageID == messageID else { return }
         for index in reply.toolCalls.indices {
@@ -882,8 +883,16 @@ public final class ChatStore {
                 // It only adds a picture to this chat, so it doesn't ask.
                 result = await generateImage(call, config: config, model: model, into: messageID, in: id)
             case .fetch?:
-                // It only reads a public page, like a read-only tool, so it doesn't ask.
-                result = await fetchPage(call, for: messageID)
+                // A page the user gave a link to is read without asking. Any other address may have come from a page
+                // the model read, so the user decides. An address that is refused outright needs no answer.
+                let said = (conversations.first { $0.id == id }?.messages ?? []).filter { $0.role == .user }.map(\.content)
+                if let request = try? FetchRequest.parse(arguments: call.arguments), !FetchRequest.isNamed(request.url, in: said),
+                   !(await approve(call.id)) {
+                    guard !Task.isCancelled else { return }
+                    result = .init(text: "The user declined to read this address.", isError: true)
+                } else {
+                    result = await fetchPage(call, for: messageID)
+                }
             case .mcp(let tool)?:
                 if !tool.tool.readOnly, !(await approve(call.id)) {
                     guard !Task.isCancelled else { return }

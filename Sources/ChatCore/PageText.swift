@@ -9,6 +9,9 @@ public enum PageText {
     }
 
     private static let dropped: Set<String> = ["script", "style", "noscript", "template", "svg"]
+    private static let headElements: Set<String> = ["base", "link", "meta", "title"]
+    /// A title that never closes would otherwise be the rest of the page.
+    private static let titleLimit = 300
     /// Tags whose start and end break the line.
     private static let blocks: Set<String> = [
         "address", "article", "aside", "blockquote", "br", "dd", "details", "div", "dl", "dt", "fieldset", "figcaption",
@@ -102,10 +105,13 @@ public enum PageText {
 
             var end = nameEnd
             var quote: Unicode.Scalar?
+            var previous: Unicode.Scalar?
             while end < s.count {
                 if let open = quote { if s[end] == open { quote = nil } }
-                else if s[end] == "\"" || s[end] == "'" { quote = s[end] }
+                // A quote opens a value only right after `=`. In `alt=Don't` it is part of the word.
+                else if (s[end] == "\"" || s[end] == "'") && previous == "=" { quote = s[end] }
                 else if s[end] == ">" { break }
+                if !s[end].properties.isWhitespace { previous = s[end] }
                 end += 1
             }
             guard end < s.count else { break }
@@ -115,14 +121,15 @@ public enum PageText {
                 if !closing { i = find("</" + name, from: i).flatMap { find(">", from: $0) }.map { $0 + 1 } ?? s.count }
                 continue
             }
+            if inHead, name != "head", !headElements.contains(name) { inHead = false }
             switch name {
             case "head": inHead = !closing
             case "body": inHead = false
             case "title" where !closing:
                 let close = find("</title", from: i) ?? s.count
                 if title == nil {
-                    let found = text(i..<close).split(whereSeparator: \.isWhitespace).joined(separator: " ")
-                    title = found.isEmpty ? nil : found
+                    let found = text(i..<close).split(whereSeparator: \.isWhitespace).joined(separator: " ").prefix(titleLimit)
+                    title = found.isEmpty ? nil : String(found)
                 }
                 i = find(">", from: close).map { $0 + 1 } ?? s.count
             case "pre": preDepth = max(0, preDepth + (closing ? -1 : 1))
@@ -132,7 +139,11 @@ public enum PageText {
         }
 
         var lines = String(out).split(separator: "\n", omittingEmptySubsequences: false)
-            .map { $0.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression) }
+            .map { line in
+                var line = line
+                while let last = line.last, last.isWhitespace { line.removeLast() }
+                return String(line)
+            }
         var kept: [String] = []
         for line in lines {
             if line.isEmpty, kept.last?.isEmpty != false { continue }

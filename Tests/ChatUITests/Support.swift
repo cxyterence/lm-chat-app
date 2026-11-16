@@ -109,7 +109,7 @@ final class StubServer: @unchecked Sendable {
     /// The address of a page on this server.
     func pageURL(_ path: String = "/page/a") -> URL { URL(string: "http://\(host)\(path)")! }
     /// A page fetcher that reads from this server and does no DNS lookup, since the host name resolves nowhere.
-    var fetcher: PageFetcher { PageFetcher(session: session, resolve: { _ in [] }) }
+    var fetcher: PageFetcher { PageFetcher(session: session, resolve: { _ in ["93.184.216.34"] }) }
 
     /// Bodies of streamed chat requests, oldest first. Title requests are answered "Stub Title" and left out.
     var chats: [[String: Any]] { lock.withLock { received } }

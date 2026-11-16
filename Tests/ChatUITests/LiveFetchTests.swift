@@ -12,6 +12,10 @@ struct LiveFetchTests {
     private func untilIdle(_ store: ChatStore, seconds: Int = 600) async {
         let deadline = ContinuousClock.now + .seconds(seconds)
         while store.isBusy {
+            if store.awaitingApproval != nil {
+                Issue.record("it asked before reading an address the user had written")
+                store.resolveApproval(true)
+            }
             if ContinuousClock.now > deadline {
                 Issue.record("still busy after \(seconds) seconds, so it was stopped")
                 store.stop()
@@ -40,7 +44,7 @@ struct LiveFetchTests {
         let result = try #require(call.result, "the call has no result")
         #expect(!result.isError, "\(result.text)")
         #expect(result.text.contains("Example Domain"), "\(result.text.prefix(300))")
-        #expect(call.server == "example.com")
+        #expect(call.server.hasPrefix("https://example.com"), "the row shows the address: \(call.server)")
 
         let reply = try #require(messages.last { $0.role == .assistant })
         #expect(reply.toolCalls.isEmpty && reply.content.contains("Example Domain"), "the final reply was \"\(reply.content)\"")
