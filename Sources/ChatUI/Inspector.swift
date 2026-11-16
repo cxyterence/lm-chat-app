@@ -71,7 +71,7 @@ private struct SummaryGrid: View {
         case .stopped: cells.append(Cell(value: "Stopped", label: "Status"))
         case .failed(let headline, _):
             let parts = headline.split(separator: " ", maxSplits: 1).map(String.init)
-            cells.append(exchange.status == nil ? Cell(value: "None", label: "No response", color: palette.danger)
+            cells.append(exchange.status == nil ? Cell(value: "Failed", label: "No response", color: palette.danger)
                                                 : Cell(value: parts[0], label: parts.dropFirst().first ?? "", color: palette.danger))
         }
         if let first = stats.timeToFirstToken { cells.append(Cell(value: ExchangeText.duration(first), label: "First token")) }

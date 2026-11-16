@@ -99,7 +99,7 @@ struct CapabilityReportPage: View {
             switch report.tools {
             case .yes: Finding("Tools", .yes)
             case .onlyWithReasoningOff:
-                Finding("Tools", .qualified("Reasoning off"), reason: "The server refuses tools while the model reasons.")
+                Finding("Tools", .qualified("Reasoning off only"), reason: "The server refuses tools while the model reasons.")
             case .no(let reason): Finding("Tools", .no, reason: reason)
             case .unknown(let reason): Finding("Tools", .unknown, reason: reason)
             }
