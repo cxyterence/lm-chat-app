@@ -94,6 +94,11 @@ public final class ChatStore {
     /// Rounds of tool use one reply may take before it must answer with what it has.
     static let maxToolRounds = 10
 
+    /// The least time between two saves of a reply as it streams.
+    static let partialSaveInterval: TimeInterval = 2
+
+    static let backgroundFailure = "The reply stopped while the app was in the background."
+
     /// Settings from before connections existed, read once to build the first connection.
     private enum LegacyKeys {
         static let baseURL = "baseURL"
@@ -136,6 +141,16 @@ public final class ChatStore {
 
     @ObservationIgnored let defaults: UserDefaults
     @ObservationIgnored private let secrets: Secrets
+    @ObservationIgnored private let background: BackgroundTime
+    @ObservationIgnored private let now: () -> Date
+    /// Ends the extra time iOS gave. Held only while a reply streams and the app is in the background.
+    @ObservationIgnored private var endBackgroundTime: (() -> Void)?
+    @ObservationIgnored private var lastPartialSave = Date.distantPast
+    /// Every write of the chat file goes through here, in order, so a slow write of a reply in progress can't land
+    /// after the save that follows it.
+    @ObservationIgnored private let writer = DispatchQueue(label: "ChatStore.writer")
+    /// Whether the app left the screen while the current reply streamed.
+    @ObservationIgnored private var leftWhileStreaming = false
     @ObservationIgnored private var effortCheck: Task<Void, Never>?
     @ObservationIgnored private let fileURL: URL
     @ObservationIgnored let images: ImageStore
@@ -152,13 +167,16 @@ public final class ChatStore {
     @ObservationIgnored private var withoutUsage: Set<String> = []
 
     public convenience init() {
-        self.init(defaults: .standard, fileURL: ChatStore.defaultFileURL, secrets: .keychain)
+        self.init(defaults: .standard, fileURL: ChatStore.defaultFileURL, secrets: .keychain, background: .system)
     }
 
-    init(defaults: UserDefaults, fileURL: URL, secrets: Secrets, session: URLSession = .shared, pages: PageFetcher = PageFetcher()) {
+    init(defaults: UserDefaults, fileURL: URL, secrets: Secrets, session: URLSession = .shared, pages: PageFetcher = PageFetcher(),
+         background: BackgroundTime = .none, now: @escaping () -> Date = Date.init) {
         self.defaults = defaults
         self.fileURL = fileURL
         self.secrets = secrets
+        self.background = background
+        self.now = now
         self.session = session
         self.pages = pages
         fetchesPages = defaults.bool(forKey: Keys.fetchPages)
@@ -604,6 +622,25 @@ public final class ChatStore {
         if case .streaming(_, let task) = generation { task.cancel() }
     }
 
+    /// Saves what has arrived and asks iOS for time to keep the reply coming.
+    func appMovedToBackground() {
+        guard isBusy else { return }
+        leftWhileStreaming = true
+        persist()
+        guard endBackgroundTime == nil else { return }
+        endBackgroundTime = background.begin { [weak self] in
+            self?.persist()
+            self?.releaseBackgroundTime()
+        }
+    }
+
+    func appBecameActive() { releaseBackgroundTime() }
+
+    private func releaseBackgroundTime() {
+        endBackgroundTime?()
+        endBackgroundTime = nil
+    }
+
     func retry() {
         guard case .failed(let id, _, let request) = generation,
               let index = conversations.firstIndex(where: { $0.id == id })
@@ -789,6 +826,7 @@ public final class ChatStore {
     private func startStreaming(conversationID id: UUID, request: Request = .reply) {
         guard let config, conversations.contains(where: { $0.id == id }) else { return }
         releaseFailedReply()
+        leftWhileStreaming = false
         let first = beginOutput(in: id, role: request == .reply ? .assistant : .summary)
         let task = Task { await generate(conversationID: id, request: request, first: first, config: config) }
         generation = .streaming(conversationID: id, task: task)
@@ -837,7 +875,9 @@ public final class ChatStore {
             }
             if Task.isCancelled { outcome = .cancelled }
         } catch {
-            outcome = Task.isCancelled ? .cancelled : .failed(error.localizedDescription)
+            // A dropped connection after the app left the screen is iOS's doing, not the server's.
+            let message = leftWhileStreaming && error is URLError ? Self.backgroundFailure : error.localizedDescription
+            outcome = Task.isCancelled ? .cancelled : .failed(message)
         }
         finish(conversationID: id, messageID: current, request: request, outcome: outcome)
     }
@@ -868,8 +908,12 @@ public final class ChatStore {
                 }
                 guard let reply = liveReply, reply.messageID == messageID else { continue }
                 switch event {
-                case .content(let text): reply.content += text
-                case .reasoning(let text): reply.reasoning += text
+                case .content(let text):
+                    reply.content += text
+                    savePartialReply()
+                case .reasoning(let text):
+                    reply.reasoning += text
+                    savePartialReply()
                 case .toolCall(let delta):
                     calls.add(delta)
                     reply.toolCalls = calls.calls.map { call in
@@ -1038,6 +1082,7 @@ public final class ChatStore {
             conversations[c].updatedAt = Date()
         }
         if liveReply?.messageID == messageID { liveReply = nil }
+        releaseBackgroundTime()
         if case .failed(let message) = outcome {
             generation = .failed(conversationID: id, message: message, request: request)
         } else {
@@ -1046,12 +1091,51 @@ public final class ChatStore {
         persist()
     }
 
-    private func persist() {
-        do {
-            try ConversationStore.save(conversations, to: fileURL)
-            persistenceError = nil
-        } catch {
-            persistenceError = "Couldn't save chats: \(error.localizedDescription)"
+    /// Saves the reply so far, at most once per `partialSaveInterval`.
+    private func savePartialReply() {
+        let time = now()
+        guard time.timeIntervalSince(lastPartialSave) >= Self.partialSaveInterval else { return }
+        lastPartialSave = time
+        persist(inBackground: true)
+    }
+
+    /// Returns once every save asked for so far is on disk.
+    func finishPendingSaves() { writer.sync {} }
+
+    /// What goes to disk. A reply still streaming is saved as it stands and marked interrupted, so a chat found
+    /// like that at launch shows it. In memory the reply stays in `liveReply` until it finishes.
+    private func conversationsToSave() -> [Conversation] {
+        var saved = conversations
+        guard let live = liveReply else { return saved }
+        for c in saved.indices {
+            guard let m = saved[c].messages.firstIndex(where: { $0.id == live.messageID }) else { continue }
+            guard saved[c].messages[m].role == .assistant else { break }
+            if live.content.isEmpty && live.reasoning.isEmpty && live.toolCalls.isEmpty {
+                saved[c].messages.remove(at: m)
+            } else {
+                saved[c].messages[m].content = live.content
+                saved[c].messages[m].reasoning = live.reasoning
+                saved[c].messages[m].toolCalls = live.toolCalls
+                saved[c].messages[m].interrupted = true
+            }
+            break
+        }
+        return saved
+    }
+
+    /// Encoding a long history takes tens of milliseconds, so a save that streaming asks for happens off the main thread.
+    private func persist(inBackground: Bool = false) {
+        let saved = conversationsToSave(), url = fileURL
+        if inBackground {
+            writer.async { [weak self] in
+                guard case .failure(let error) = Result(catching: { try ConversationStore.save(saved, to: url) }) else { return }
+                Task { @MainActor in self?.persistenceError = "Couldn't save chats: \(error.localizedDescription)" }
+            }
+            return
+        }
+        switch writer.sync(execute: { Result(catching: { try ConversationStore.save(saved, to: url) }) }) {
+        case .success: persistenceError = nil
+        case .failure(let error): persistenceError = "Couldn't save chats: \(error.localizedDescription)"
         }
     }
 }

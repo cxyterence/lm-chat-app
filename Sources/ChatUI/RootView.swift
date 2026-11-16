@@ -3,6 +3,7 @@ import SwiftUI
 public struct RootView: View {
     let store: ChatStore
     @State private var showSettings = false
+    @Environment(\.scenePhase) private var scenePhase
 
     public init(store: ChatStore) { self.store = store }
 
@@ -18,6 +19,13 @@ public struct RootView: View {
             }
         }
         .theme(store.theme)
+        .onChange(of: scenePhase) { _, phase in
+            switch phase {
+            case .background: store.appMovedToBackground()
+            case .active: store.appBecameActive()
+            default: break
+            }
+        }
         .sheet(isPresented: $showSettings) {
             SettingsView(store: store, page: store.isConfigured ? nil : .connections).theme(store.theme)
         }

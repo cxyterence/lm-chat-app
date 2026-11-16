@@ -101,6 +101,33 @@ final class StubServer: @unchecked Sendable {
     /// Answers GET /server_info when set.
     nonisolated(unsafe) var serverInfo: Reply?
     var root: URL { URL(string: "http://\(host)")! }
+    /// Leaves each streamed chat reply open after its body, so a test sees the app mid-stream. `deliver` sends more of it,
+    /// `endStreams` finishes it and `dropStreams` breaks the connection.
+    nonisolated(unsafe) var holdsStreamsOpen = false
+    private var open: [StubProtocol] = []
+
+    fileprivate func holds(_ request: URLRequest, body: [String: Any]) -> Bool {
+        holdsStreamsOpen && request.url?.path.hasSuffix("chat/completions") == true && body["stream"] as? Bool == true
+            && transcript(body).first?.text.hasPrefix("You name chat conversations") != true
+    }
+
+    fileprivate func hold(_ stream: StubProtocol) { lock.withLock { open.append(stream) } }
+
+    func deliver(_ chunks: [String]) {
+        let text = sse(chunks).replacingOccurrences(of: "data: [DONE]\n\n", with: "")
+        for stream in lock.withLock({ open }) { stream.deliver(Data(text.utf8)) }
+    }
+
+    func endStreams() {
+        for stream in lock.withLock({ let all = open; open = []; return all }) {
+            stream.deliver(Data("data: [DONE]\n\n".utf8))
+            stream.finish()
+        }
+    }
+
+    func dropStreams() {
+        for stream in lock.withLock({ let all = open; open = []; return all }) { stream.fail(URLError(.networkConnectionLost)) }
+    }
     /// Answers GET /page/... with a status, a content type and a body, by path, when set.
     nonisolated(unsafe) var page: (@Sendable (String) -> (status: Int, type: String, body: String))?
     private var visited: [URLRequest] = []
@@ -257,8 +284,13 @@ final class StubProtocol: URLProtocol {
                                        headerFields: ["Content-Type": "text/event-stream"])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: Data(reply.body.utf8))
+        if server.holds(request, body: body ?? [:]) { return server.hold(self) }
         client?.urlProtocolDidFinishLoading(self)
     }
+
+    fileprivate func deliver(_ data: Data) { client?.urlProtocol(self, didLoad: data) }
+    fileprivate func finish() { client?.urlProtocolDidFinishLoading(self) }
+    fileprivate func fail(_ error: Error) { client?.urlProtocol(self, didFailWithError: error) }
 
     override func stopLoading() {}
 
@@ -299,19 +331,29 @@ struct Rig {
     private let secrets: Secrets
     let cleanup: @Sendable () -> Void
 
-    init(server: StubServer, key: String = "") {
+    init(server: StubServer, key: String = "", background: BackgroundTime = .none, now: @escaping () -> Date = Date.init) {
         let (defaults, cleanDefaults) = makeDefaults()
         let (file, cleanFile) = makeTempFileURL("conversations.json")
         let secrets = Secrets.memory()
-        let store = ChatStore(defaults: defaults, fileURL: file, secrets: secrets, session: server.session, pages: server.fetcher)
+        let store = ChatStore(defaults: defaults, fileURL: file, secrets: secrets, session: server.session, pages: server.fetcher,
+                              background: background, now: now)
         let connection = Connection(name: "stub", baseURL: server.baseURL, model: "m")
         store.saveConnection(connection, apiKey: key)
         (self.store, self.server, self.connection, self.defaults, self.file, self.secrets) = (store, server, connection, defaults, file, secrets)
         cleanup = { cleanDefaults(); cleanFile() }
     }
 
+    /// What is in the chat file right now.
+    func saved() throws -> [Conversation] {
+        store.finishPendingSaves()
+        return try ConversationStore.load(from: file)
+    }
+
     /// What a new launch would load.
-    func reopened() -> ChatStore { ChatStore(defaults: defaults, fileURL: file, secrets: secrets, session: server.session, pages: server.fetcher) }
+    func reopened() -> ChatStore {
+        store.finishPendingSaves()
+        return ChatStore(defaults: defaults, fileURL: file, secrets: secrets, session: server.session, pages: server.fetcher)
+    }
 }
 
 func jsonObject(_ data: Data) -> [String: Any]? { try? JSONSerialization.jsonObject(with: data) as? [String: Any] }
