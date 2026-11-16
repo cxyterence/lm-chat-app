@@ -54,6 +54,17 @@ public final class ChatStore {
         case done(TextComparison)
     }
 
+    /// What the fields of the Compare Texts page hold.
+    struct ComparisonDraft: Equatable {
+        var mode: TextComparison.Mode = .embeddings
+        var model: String
+        var query = exampleQuery
+        var texts = exampleTexts
+
+        static let exampleQuery = "a small cat"
+        static let exampleTexts = "A kitten sleeps on the sofa\nHow to file a tax return\nThe cat sat on the mat"
+    }
+
     enum ModelsState: Equatable {
         case idle
         case loading
@@ -113,6 +124,8 @@ public final class ChatStore {
     private(set) var capabilityChecks: [CapabilityKey: CapabilityCheck] = [:]
     /// The last Compare Texts run of each connection. Memory only. Its request is in `exchangeLog` under the connection's ID.
     private(set) var comparisons: [UUID: Comparison] = [:]
+    /// The fields of each connection's Compare Texts page, so coming back finds them as they were left. Memory only.
+    private var comparisonDrafts: [UUID: ComparisonDraft] = [:]
     private(set) var mcpServers: [MCPServer] = []
     private(set) var mcpStatus: [UUID: MCPStatus] = [:]
     private var savedImageTool: ImageTool?
@@ -254,6 +267,7 @@ public final class ChatStore {
         connections.removeAll { $0.id == id }
         capabilityChecks = capabilityChecks.filter { $0.key.connection != id }
         comparisons[id] = nil
+        comparisonDrafts[id] = nil
         exchangeLog.drop([id])
         apiKeys[id] = nil
         secrets.set(connection.secretAccount, "")
@@ -681,11 +695,11 @@ public final class ChatStore {
     }
 
     /// Compares `query` with `texts` on a connection, with the model and endpoint the page picked, and keeps the
-    /// outcome and the request. Stopping the task that runs this puts the page back to idle.
+    /// outcome and the request. Stopping the task that runs this puts the page back as it was.
     func compare(_ mode: TextComparison.Mode, on connectionID: UUID, model: String, query: String, texts: [String]) async {
         guard let connection = connections.first(where: { $0.id == connectionID }), comparisons[connectionID] != .running else { return }
+        let before = comparisons[connectionID]
         comparisons[connectionID] = .running
-        exchangeLog.drop([connectionID])
         // Reported straight into a box, not through `recorder`, so the request is kept before the page shows its outcome.
         let sent = SentExchanges()
         let client = ChatClient(config: connection.serverConfig(apiKey: apiKeys[connectionID]), session: session, record: sent.add)
@@ -696,8 +710,22 @@ public final class ChatStore {
             outcome = Task.isCancelled ? .idle : .failed(TextComparison.failureMessage(for: error, mode: mode))
         }
         guard connections.contains(where: { $0.id == connectionID }) else { return }
+        if outcome == .idle, let before, before != .idle {
+            comparisons[connectionID] = before
+            return
+        }
+        exchangeLog.drop([connectionID])
         sent.all.forEach { attach($0, to: connectionID) }
         comparisons[connectionID] = outcome
+    }
+
+    func comparisonDraft(for connectionID: UUID) -> ComparisonDraft {
+        comparisonDrafts[connectionID] ?? ComparisonDraft(model: connections.first { $0.id == connectionID }?.model ?? "")
+    }
+
+    func setComparisonDraft(_ draft: ComparisonDraft, for connectionID: UUID) {
+        guard connections.contains(where: { $0.id == connectionID }) else { return }
+        comparisonDrafts[connectionID] = draft
     }
 
     /// The request of a connection's last Compare Texts run.

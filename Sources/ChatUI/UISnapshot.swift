@@ -108,12 +108,12 @@ public enum UISnapshot {
         try write(page(.running), size: phone, appearance: appearance, to: file("check-running"))
     }
 
-    /// The Compare Texts page before a run, with embeddings results, with rerank results, running, and after a 404.
+    /// The Compare Texts page before a run, with embeddings results, with rerank results, running, after a 404, and with no model.
     @MainActor private static func renderCompareTexts(theme: Theme, appearance: NSAppearance?, to directory: URL) throws {
         func page(_ state: ChatStore.Comparison, mode: TextComparison.Mode = .embeddings) -> some View {
             NavigationStack {
-                TextComparisonPage(models: ["bge-small-en-v1.5", "jina-reranker-v1-tiny-en"], model: "bge-small-en-v1.5", mode: mode,
-                                   state: state, canInspect: true, run: { _, _, _, _ in }, inspect: {})
+                TextComparisonPage(models: ["bge-small-en-v1.5", "jina-reranker-v1-tiny-en"],
+                                   draft: .init(mode: mode, model: "bge-small-en-v1.5"), state: state, canInspect: true, run: { _, _, _, _ in }, inspect: {})
                     .background(theme.palette.groupedBackground)
             }
             .theme(theme)
@@ -127,6 +127,13 @@ public enum UISnapshot {
             try write(page(state, mode: mode), size: CGSize(width: 390, height: 900), appearance: appearance,
                       to: directory.appendingPathComponent("\(theme.rawValue)-devtools-\(name).png"))
         }
+        let noModel = NavigationStack {
+            TextComparisonPage(models: [], draft: .init(model: ""), state: .idle, canInspect: false, run: { _, _, _, _ in }, inspect: {})
+                .background(theme.palette.groupedBackground)
+        }
+        .theme(theme)
+        try write(noModel, size: CGSize(width: 390, height: 900), appearance: appearance,
+                  to: directory.appendingPathComponent("\(theme.rawValue)-devtools-compare-no-model.png"))
     }
 
     private static var sampleConversation: Conversation {

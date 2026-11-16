@@ -126,6 +126,76 @@ struct CompareTextsTests {
         #expect(rig.store.comparisonExchange(of: id)?.error == Exchange.cancelledMessage, "the request that was stopped is still inspectable")
     }
 
+    @Test func leavingMidRunPutsTheLastResultAndItsRequestBack() async throws {
+        let release = DispatchSemaphore(value: 0)
+        let rig = rig()
+        defer { rig.cleanup() }
+        let id = rig.connection.id
+        await rig.store.compare(.embeddings, on: id, model: "m", query: "first", texts: texts)
+        let kept = try result(rig)
+        let keptExchange = try #require(rig.store.comparisonExchange(of: id))
+
+        rig.server.embeddings = { _ in
+            release.wait()
+            return (200, Self.fourVectors)
+        }
+        let run = Task { await rig.store.compare(.embeddings, on: id, model: "m", query: "second", texts: texts) }
+        await until { rig.server.comparisons.count == 2 }
+        #expect(rig.store.comparisons[id] == .running)
+        run.cancel()
+        await run.value
+        release.signal()
+
+        #expect(rig.store.comparisons[id] == .done(kept), "the page shows what it showed before")
+        #expect(rig.store.comparisonExchange(of: id) == keptExchange, "and Inspect still opens that result's request")
+        #expect(rig.store.exchanges(for: id).count == 1)
+    }
+
+    @Test func aFailureOrAnotherResultReplacesTheLastRequestAsBefore() async throws {
+        let rig = rig()
+        defer { rig.cleanup() }
+        let id = rig.connection.id
+        await rig.store.compare(.embeddings, on: id, model: "m", query: "first", texts: texts)
+        let first = try #require(rig.store.comparisonExchange(of: id))
+        rig.server.embeddings = { _ in (500, #"{"error":{"message":"boom"}}"#) }
+
+        await rig.store.compare(.embeddings, on: id, model: "m", query: "second", texts: texts)
+
+        guard case .failed = rig.store.comparisons[id] else { throw StateError(state: "\(String(describing: rig.store.comparisons[id]))") }
+        #expect(rig.store.comparisonExchange(of: id)?.id != first.id && rig.store.exchanges(for: id).count == 1)
+    }
+
+    @Test func theFieldsOfTheComparePageAreKeptPerConnectionAndForgottenWithIt() async throws {
+        let rig = rig()
+        defer { rig.cleanup() }
+        let id = rig.connection.id
+
+        var draft = rig.store.comparisonDraft(for: id)
+        #expect(draft == ChatStore.ComparisonDraft(model: rig.connection.model), "a first visit starts from the connection's model")
+        #expect(draft.mode == .embeddings && draft.query == "a small cat" && draft.texts.split(separator: "\n").count == 3)
+
+        draft.mode = .rerank
+        draft.model = "jina"
+        draft.query = "dogs"
+        draft.texts = "a\nb"
+        rig.store.setComparisonDraft(draft, for: id)
+        #expect(rig.store.comparisonDraft(for: id) == draft, "coming back finds the page as it was left")
+
+        let other = Connection(name: "other", baseURL: rig.server.baseURL, model: "x")
+        rig.store.saveConnection(other, apiKey: "")
+        #expect(rig.store.comparisonDraft(for: other.id) == ChatStore.ComparisonDraft(model: "x"))
+
+        rig.store.deleteConnection(id)
+        #expect(rig.store.comparisonDraft(for: id) == ChatStore.ComparisonDraft(model: ""))
+    }
+
+    @Test func aMissingModelIsSaidInOneLineOnThePage() {
+        #expect(TextComparisonPage.modelPrompt(model: "", hasChoices: true) == "Pick a model to run.")
+        #expect(TextComparisonPage.modelPrompt(model: "  ", hasChoices: false) == "Type the name of a model to run.")
+        #expect(TextComparisonPage.modelPrompt(model: "bge", hasChoices: false) == nil)
+        #expect(TextComparisonPage.modelPrompt(model: "bge", hasChoices: true) == nil)
+    }
+
     @Test func aServerWithNoEndpointFailsWithItsOwnWordsAndOneSentenceAndStaysInspectable() async throws {
         let server = StubServer { _ in (200, "") }
         server.embeddings = { _ in (404, #"{"detail":"Not Found"}"#) }

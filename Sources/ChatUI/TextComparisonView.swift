@@ -15,7 +15,8 @@ struct TextComparisonView: View {
     var body: some View {
         TextComparisonPage(
             models: models,
-            model: connection?.model ?? "",
+            draft: store.comparisonDraft(for: connectionID),
+            edit: { store.setComparisonDraft($0, for: connectionID) },
             state: store.comparisons[connectionID] ?? .idle,
             canInspect: store.comparisonExchange(of: connectionID) != nil,
             run: { mode, model, query, texts in
@@ -33,66 +34,76 @@ struct TextComparisonView: View {
 struct TextComparisonPage: View {
     typealias Mode = TextComparison.Mode
 
-    static let exampleQuery = "a small cat"
-    static let exampleTexts = "A kitten sleeps on the sofa\nHow to file a tax return\nThe cat sat on the mat"
-
     /// What the server lists. The picked model is offered too, so a server with no model list still has one choice.
     let models: [String]
     let state: ChatStore.Comparison
     let canInspect: Bool
+    let edit: (ChatStore.ComparisonDraft) -> Void
     let run: (Mode, String, String, [String]) -> Void
     let inspect: () -> Void
-    @State private var model: String
-    @State private var mode: Mode
-    @State private var query: String
-    @State private var texts: String
+    @State private var draft: ChatStore.ComparisonDraft
     @Environment(\.palette) private var palette
 
-    init(models: [String], model: String, mode: Mode = .embeddings, query: String = exampleQuery, texts: String = exampleTexts,
+    init(models: [String], draft: ChatStore.ComparisonDraft, edit: @escaping (ChatStore.ComparisonDraft) -> Void = { _ in },
          state: ChatStore.Comparison, canInspect: Bool, run: @escaping (Mode, String, String, [String]) -> Void,
          inspect: @escaping () -> Void) {
         self.models = models
+        self.edit = edit
         self.state = state
         self.canInspect = canInspect
         self.run = run
         self.inspect = inspect
-        _model = State(initialValue: model)
-        _mode = State(initialValue: mode)
-        _query = State(initialValue: query)
-        _texts = State(initialValue: texts)
+        _draft = State(initialValue: draft)
     }
 
-    private var choices: [String] { model.isEmpty || models.contains(model) ? models : [model] + models }
-    private var lines: [String] { TextComparison.texts(from: texts) }
+    private var choices: [String] { draft.model.isEmpty || models.contains(draft.model) ? models : [draft.model] + models }
+    private var lines: [String] { TextComparison.texts(from: draft.texts) }
     private var running: Bool { state == .running }
-    private var canRun: Bool { !model.isEmpty && !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !lines.isEmpty && !running }
+    private var canRun: Bool {
+        !draft.model.trimmingCharacters(in: .whitespaces).isEmpty && !draft.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !lines.isEmpty && !running
+    }
+
+    /// Why Run can't work for want of a model, in one line. Nil when there is a model.
+    static func modelPrompt(model: String, hasChoices: Bool) -> String? {
+        guard model.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        return hasChoices ? "Pick a model to run." : "Type the name of a model to run."
+    }
 
     var body: some View {
         Form {
             Section {
-                Picker("Model", selection: $model) {
-                    ForEach(choices, id: \.self) { Text($0).tag($0) }
+                if choices.isEmpty {
+                    TextField("Model", text: $draft.model)
+                        .autocorrectionDisabled()
+                        #if os(iOS)
+                        .textInputAutocapitalization(.never)
+                        #endif
+                } else {
+                    Picker("Model", selection: $draft.model) {
+                        ForEach(choices, id: \.self) { Text($0).tag($0) }
+                    }
                 }
-                .disabled(choices.isEmpty)
-                Picker("Endpoint", selection: $mode) {
+                Picker("Endpoint", selection: $draft.mode) {
                     ForEach(Mode.allCases, id: \.self) { Text($0.title).tag($0) }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
             } footer: {
-                Text(mode == .embeddings ? "Ranks the texts by how close their embeddings are to the query's."
-                                         : "Asks the server to score each text against the query.")
+                Text(Self.modelPrompt(model: draft.model, hasChoices: !choices.isEmpty)
+                     ?? (draft.mode == .embeddings ? "Ranks the texts by how close their embeddings are to the query's."
+                                                   : "Asks the server to score each text against the query."))
             }
             .listRowBackground(palette.surface)
 
             Section {
-                TextField("Query", text: $query)
+                TextField("Query", text: $draft.query)
                     .autocorrectionDisabled()
             }
             .listRowBackground(palette.surface)
 
             Section {
-                TextEditor(text: $texts)
+                TextEditor(text: $draft.texts)
                     .scrollContentBackground(.hidden)
                     .autocorrectionDisabled()
                     .frame(minHeight: 100)
@@ -104,7 +115,7 @@ struct TextComparisonPage: View {
             .listRowBackground(palette.surface)
 
             Section {
-                Button { run(mode, model, query.trimmingCharacters(in: .whitespacesAndNewlines), lines) } label: {
+                Button { run(draft.mode, draft.model.trimmingCharacters(in: .whitespaces), draft.query.trimmingCharacters(in: .whitespacesAndNewlines), lines) } label: {
                     Text(state == .idle ? "Run" : "Run Again")
                         .foregroundStyle(canRun ? palette.accent : palette.secondaryText)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -124,7 +135,8 @@ struct TextComparisonPage: View {
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .animation(.snappy(duration: 0.2), value: state)
-        .onChange(of: models) { if model.isEmpty { model = models.first ?? "" } }
+        .onChange(of: models) { if draft.model.isEmpty { draft.model = models.first ?? "" } }
+        .onChange(of: draft) { edit(draft) }
     }
 
     @ViewBuilder private var outcome: some View {
