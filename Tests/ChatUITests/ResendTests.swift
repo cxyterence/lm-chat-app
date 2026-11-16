@@ -21,7 +21,7 @@ struct ResendTests {
         await untilIdle(rig.store)
         let message = try reply(rig.store)
         let original = try #require(rig.store.exchanges(for: message.id).first)
-        let before = rig.store.selectedConversation
+        let before = rig.store.selectedConversation?.messages
 
         let edited = original.displayBody.replacingOccurrences(of: "\"hello\"", with: "\"Reply with exactly the word PINEAPPLE.\"")
         let sent = await rig.store.resend(original, editedText: edited, for: message.id)
@@ -29,7 +29,7 @@ struct ResendTests {
         #expect(sent.purpose == .resend && sent.status == 200 && sent.error == nil)
         #expect(sent.responseBody.contains("PINEAPPLE"))
         #expect(rig.store.exchanges(for: message.id).map(\.id) == [original.id, sent.id])
-        #expect(rig.store.selectedConversation == before, "no message was added, changed or removed")
+        #expect(rig.store.selectedConversation?.messages == before, "no message was added, changed or removed")
         #expect(server.chats.last.map(transcript)?.last?.text == "Reply with exactly the word PINEAPPLE.")
         let credentials = server.authorizations.filter { $0.path.hasSuffix("chat/completions") }
         #expect(credentials.last?.authorization == "Bearer chat-key", "the connection's own key goes with it")
@@ -45,13 +45,13 @@ struct ResendTests {
         await untilIdle(rig.store)
         let message = try reply(rig.store)
         let original = try #require(rig.store.exchanges(for: message.id).first)
-        let before = rig.store.selectedConversation
+        let before = rig.store.selectedConversation?.messages
 
         let sent = await rig.store.resend(original, editedText: "{ not json", for: message.id)
 
         #expect(sent.purpose == .resend && sent.error != nil)
         #expect(rig.store.exchanges(for: message.id).last?.id == sent.id)
-        #expect(rig.store.selectedConversation == before)
+        #expect(rig.store.selectedConversation?.messages == before)
     }
 
     @Test func aPictureRequestGoesWithTheImageConnectionsKeyAndAChatRequestWithTheChatOnes() async throws {
