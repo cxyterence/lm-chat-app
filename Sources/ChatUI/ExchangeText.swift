@@ -42,6 +42,8 @@ enum ExchangeText {
         case .models: "Model list"
         case .probe: "Check request"
         case .fetch: "Page request"
+        case .embedding: "Embeddings request"
+        case .rerank: "Rerank request"
         }
     }
 

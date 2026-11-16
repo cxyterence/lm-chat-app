@@ -126,6 +126,21 @@ enum DevToolsSnapshot {
         return ChatStore(defaults: defaults, fileURL: directory.appendingPathComponent("fetch.json"), secrets: .memory())
     }
 
+    static let embeddingsResult = ChatStore.Comparison.done(TextComparison(
+        mode: .embeddings,
+        ranked: [.init(text: "The cat sat on the mat", score: 0.7798), .init(text: "A kitten sleeps on the sofa", score: 0.7686),
+                 .init(text: "How to file a tax return", score: 0.4575)],
+        dimensions: 384, tokens: 17, seconds: 0.06))
+
+    static let rerankResult = ChatStore.Comparison.done(TextComparison(
+        mode: .rerank,
+        ranked: [.init(text: "The cat sat on the mat", score: 0.005144), .init(text: "A kitten sleeps on the sofa", score: 0.0009292),
+                 .init(text: "How to file a tax return", score: -0.008032)],
+        tokens: 27, seconds: 0.02))
+
+    static let notFound = ChatStore.Comparison.failed(
+        TextComparison.failureMessage(for: ChatClientError.http(status: 404, message: "Not Found"), mode: .embeddings))
+
     static let failedCheck = ChatStore.CapabilityCheck.failed("The server rejected the API key.")
 }
 #endif

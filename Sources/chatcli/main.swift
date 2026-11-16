@@ -9,6 +9,9 @@ struct Options {
     var titleOnly = false
     var listEfforts = false
     var capabilities = false
+    var compare: TextComparison.Mode?
+    /// Every bare argument. With `--embed` or `--rerank` the first is the query and the rest are the texts.
+    var words: [String] = []
     var inspect = false
     var fetch: String?
     var api = WireAPI.chatCompletions
@@ -97,7 +100,7 @@ func printReport(_ report: CapabilityReport, model: String) {
     report.server.forEach { print("  \($0.name): \($0.value)") }
 }
 
-let usage = "usage: chatcli --fetch <url> [--inspect]  prints what the model gets from the fetch_url tool for that address, and needs no server.\n       chatcli --base <url> [--key K] [--model M] [--models] [--efforts] [--capabilities] [--inspect] [--api chat-completions|responses] [--title] [--effort <\(ReasoningEffort.allCases.map(\.rawValue).joined(separator: "|"))>] [--image <file>]... [--image-out <file> [--ar W:H] [--res N]] \"prompt\"\n  --api picks the wire format: chat-completions (the default) or responses. --capabilities checks what --model supports: tools, vision, reasoning levels, context length. --inspect prints every request made, with status, timing, tokens and a curl command, after the reply.\n  --image-out writes a picture from an image model, to probe the server. With --image it edits those photos. --ar picks the shape, such as 16:9. --res picks the long edge: 1k, 2k, 4k or 256 to 4096 pixels."
+let usage = "usage: chatcli --fetch <url> [--inspect]  prints what the model gets from the fetch_url tool for that address, and needs no server.\n       chatcli --base <url> [--key K] [--model M] [--models] [--efforts] [--capabilities] [--inspect] [--api chat-completions|responses] [--title] [--effort <\(ReasoningEffort.allCases.map(\.rawValue).joined(separator: "|"))>] [--image <file>]... [--image-out <file> [--ar W:H] [--res N]] \"prompt\"\n  --api picks the wire format: chat-completions (the default) or responses. --capabilities checks what --model supports: tools, vision, reasoning levels, context length. --inspect prints every request made, with status, timing, tokens and a curl command, after the reply.\n  --embed or --rerank (with --model) compares a query with texts: chatcli --base <url> --model M --embed \"query\" \"text one\" \"text two\". It prints the texts best match first, each with its score, then the dimensions, time and tokens.\n  --image-out writes a picture from an image model, to probe the server. With --image it edits those photos. --ar picks the shape, such as 16:9. --res picks the long edge: 1k, 2k, 4k or 256 to 4096 pixels."
 
 func parseOptions(_ args: [String]) -> Options {
     var options = Options()
@@ -140,9 +143,13 @@ func parseOptions(_ args: [String]) -> Options {
         case "--title": options.titleOnly = true
         case "--efforts": options.listEfforts = true
         case "--capabilities": options.capabilities = true
+        case "--embed": options.compare = .embeddings
+        case "--rerank": options.compare = .rerank
         case "--inspect": options.inspect = true
         case "-h", "--help": print(usage); exit(0)
-        default: options.prompt = arg
+        default:
+            options.prompt = arg
+            options.words.append(arg)
         }
     }
     return options
@@ -162,6 +169,21 @@ func run(_ options: Options) async throws {
     var config = try ServerConfig.parse(baseURL: base, apiKey: options.key)
     config.api = options.api
     let client = ChatClient(config: config, record: record)
+
+    if let mode = options.compare {
+        guard let model = options.model else { fail("--model is required with --\(mode == .embeddings ? "embed" : "rerank")\n\(usage)") }
+        guard options.words.count >= 2 else { fail("a query and at least one text are required\n\(usage)") }
+        do {
+            let result = try await client.compare(mode, model: model, query: options.words[0], texts: Array(options.words.dropFirst()))
+            for (index, entry) in result.ranked.enumerated() {
+                print("\(index + 1). \(TextComparison.format(score: entry.score))  \(entry.text)")
+            }
+            print(result.summary())
+        } catch {
+            fail(TextComparison.failureMessage(for: error, mode: mode))
+        }
+        return
+    }
 
     let models = try await client.models()
     if options.listModels {

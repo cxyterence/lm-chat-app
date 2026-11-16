@@ -39,6 +39,8 @@ enum ConnectionRoute: Hashable {
     case edit(UUID)
     /// The Check Model page of a saved connection.
     case check(UUID)
+    /// The Compare Texts page of a saved connection.
+    case compare(UUID)
 }
 
 struct SettingsView: View {
@@ -91,10 +93,10 @@ struct SettingsView: View {
             }
             .navigationDestination(for: ConnectionRoute.self) { route in
                 Group {
-                    if case .check(let id) = route {
-                        CapabilityReportView(store: store, connectionID: id)
-                    } else {
-                        ConnectionEditor(store: store, route: route)
+                    switch route {
+                    case .check(let id): CapabilityReportView(store: store, connectionID: id)
+                    case .compare(let id): TextComparisonView(store: store, connectionID: id)
+                    case .new, .edit: ConnectionEditor(store: store, route: route)
                     }
                 }
                 .background(palette.groupedBackground)
@@ -279,6 +281,13 @@ struct ConnectionEditor: View {
                     }
                 } footer: {
                     Text("Finds out whether the model takes tools and pictures, and which reasoning levels it accepts.")
+                }
+                .listRowBackground(palette.surface)
+
+                Section {
+                    NavigationLink("Compare Texts", value: ConnectionRoute.compare(existing.id))
+                } footer: {
+                    Text("Tries the server's embeddings and rerank endpoints on a few texts.")
                 }
                 .listRowBackground(palette.surface)
 

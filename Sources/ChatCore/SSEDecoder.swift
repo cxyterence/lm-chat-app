@@ -15,6 +15,8 @@ public enum ChatClientError: Error, Equatable, LocalizedError {
     case http(status: Int, message: String)
     case invalidResponse
     case server(String)
+    /// A reply that parsed but doesn't add up, worded for the user as is.
+    case unexpected(String)
 
     public var errorDescription: String? {
         switch self {
@@ -24,6 +26,8 @@ public enum ChatClientError: Error, Equatable, LocalizedError {
             "The server sent a response that couldn't be understood."
         case .server(let message):
             "Server error: \(message)"
+        case .unexpected(let message):
+            message
         }
     }
 }

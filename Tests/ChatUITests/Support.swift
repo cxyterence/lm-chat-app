@@ -92,6 +92,12 @@ final class StubServer: @unchecked Sendable {
     private var responded: [[String: Any]] = []
     /// Bodies of the streamed Responses requests the app chose to make, oldest first.
     var responseRequests: [[String: Any]] { lock.withLock { responded } }
+    /// Answers POST /v1/embeddings and /v1/rerank when set. A path with no answer is a 404.
+    nonisolated(unsafe) var embeddings: (@Sendable ([String: Any]) -> Reply)?
+    nonisolated(unsafe) var rerank: (@Sendable ([String: Any]) -> Reply)?
+    private var compared: [(path: String, body: [String: Any])] = []
+    /// The embeddings and rerank requests, oldest first.
+    var comparisons: [(path: String, body: [String: Any])] { lock.withLock { compared } }
     /// Answers GET /server_info when set.
     nonisolated(unsafe) var serverInfo: Reply?
     var root: URL { URL(string: "http://\(host)")! }
@@ -136,6 +142,10 @@ final class StubServer: @unchecked Sendable {
         }
         if path.hasSuffix("/models"), let models { return (200, models) }
         if path.hasSuffix("/server_info"), let serverInfo { return serverInfo }
+        if path.hasSuffix("/embeddings") || path.hasSuffix("/rerank") {
+            lock.withLock { compared.append((path, body)) }
+            return (path.hasSuffix("/embeddings") ? embeddings : rerank)?(body) ?? (404, "")
+        }
         if path.hasSuffix("chat/completions"), body["stream"] as? Bool != true, let probe { return probe(body) }
         if path.hasSuffix("images/generations"), let image {
             lock.withLock { drawings.append(body) }

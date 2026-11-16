@@ -46,6 +46,14 @@ public final class ChatStore {
         case done(CapabilityReport)
     }
 
+    /// Where Compare Texts stands for a connection.
+    enum Comparison: Equatable {
+        case idle
+        case running
+        case failed(String)
+        case done(TextComparison)
+    }
+
     enum ModelsState: Equatable {
         case idle
         case loading
@@ -103,6 +111,8 @@ public final class ChatStore {
     private(set) var failedReply: UUID?
     /// What Check Model found, per connection and model. Memory only.
     private(set) var capabilityChecks: [CapabilityKey: CapabilityCheck] = [:]
+    /// The last Compare Texts run of each connection. Memory only. Its request is in `exchangeLog` under the connection's ID.
+    private(set) var comparisons: [UUID: Comparison] = [:]
     private(set) var mcpServers: [MCPServer] = []
     private(set) var mcpStatus: [UUID: MCPStatus] = [:]
     private var savedImageTool: ImageTool?
@@ -207,11 +217,16 @@ public final class ChatStore {
         defaults.set(on, forKey: Keys.fetchPages)
     }
 
-    /// The image models a saved connection serves, listed with that connection's own key.
-    func imageModels(of id: UUID) async throws -> [String] {
+    /// The models a saved connection serves, listed with that connection's own key.
+    func servedModels(of id: UUID) async throws -> [ServedModel] {
         guard let connection = connections.first(where: { $0.id == id }) else { return [] }
         let config = connection.serverConfig(apiKey: apiKeys[id])
-        return try await ChatClient(config: config, session: session).models().filter(\.makesImages).map(\.id)
+        return try await ChatClient(config: config, session: session).models()
+    }
+
+    /// The image models a saved connection serves.
+    func imageModels(of id: UUID) async throws -> [String] {
+        try await servedModels(of: id).filter(\.makesImages).map(\.id)
     }
 
     /// Adds a new connection or replaces the one with the same ID. A new one becomes active.
@@ -238,6 +253,8 @@ public final class ChatStore {
         guard let connection = connections.first(where: { $0.id == id }) else { return }
         connections.removeAll { $0.id == id }
         capabilityChecks = capabilityChecks.filter { $0.key.connection != id }
+        comparisons[id] = nil
+        exchangeLog.drop([id])
         apiKeys[id] = nil
         secrets.set(connection.secretAccount, "")
         persistConnections()
@@ -599,7 +616,8 @@ public final class ChatStore {
 
     /// Keeps a request with its reply, unless the reply is gone.
     func attach(_ exchange: Exchange, to messageID: UUID) {
-        guard messageID == failedReply || conversations.contains(where: { $0.messages.contains { $0.id == messageID } }) else { return }
+        guard messageID == failedReply || connections.contains(where: { $0.id == messageID })
+                || conversations.contains(where: { $0.messages.contains { $0.id == messageID } }) else { return }
         exchangeLog.append(exchange, to: messageID)
     }
 
@@ -619,18 +637,19 @@ public final class ChatStore {
     @discardableResult
     func resend(_ exchange: Exchange, editedText: String, for messageID: UUID) async -> Exchange {
         let body = await Task.detached { exchange.placeholders.restore(editedText) }.value
-        let client = ChatClient(config: resendConfig(for: exchange), session: session)
+        let client = ChatClient(config: resendConfig(for: exchange, preferring: messageID), session: session)
         let result = await client.send(rawBody: body, to: exchange.url,
                                        contentType: exchange.requestHeader("Content-Type") ?? "application/json", method: exchange.method)
         attach(result, to: messageID)
         return result
     }
 
-    /// The connection a request was made on, so its key goes with it and only to that server. An image request
-    /// prefers the image connection and any other the active one. A request no connection matches goes without a key.
-    private func resendConfig(for exchange: Exchange) -> ServerConfig {
+    /// The connection a request was made on, so its key goes with it and only to that server. A request kept under a
+    /// connection (Compare Texts) prefers that one, an image request the image connection and any other the active
+    /// one. A request no connection matches goes without a key.
+    private func resendConfig(for exchange: Exchange, preferring messageID: UUID) -> ServerConfig {
         let isImage = exchange.purpose == .image || exchange.url.path.contains("/images/")
-        let preferred = isImage ? imageTool?.connectionID : activeConnectionID
+        let preferred = connections.contains { $0.id == messageID } ? messageID : isImage ? imageTool?.connectionID : activeConnectionID
         let address = exchange.url.absoluteString
         let connection = (connections.filter { $0.id == preferred } + connections)
             .first { address.hasPrefix($0.baseURL.absoluteString) }
@@ -659,6 +678,31 @@ public final class ChatStore {
         } catch {
             capabilityChecks[key] = .failed(error.localizedDescription)
         }
+    }
+
+    /// Compares `query` with `texts` on a connection, with the model and endpoint the page picked, and keeps the
+    /// outcome and the request. Stopping the task that runs this puts the page back to idle.
+    func compare(_ mode: TextComparison.Mode, on connectionID: UUID, model: String, query: String, texts: [String]) async {
+        guard let connection = connections.first(where: { $0.id == connectionID }), comparisons[connectionID] != .running else { return }
+        comparisons[connectionID] = .running
+        exchangeLog.drop([connectionID])
+        // Reported straight into a box, not through `recorder`, so the request is kept before the page shows its outcome.
+        let sent = SentExchanges()
+        let client = ChatClient(config: connection.serverConfig(apiKey: apiKeys[connectionID]), session: session, record: sent.add)
+        let outcome: Comparison
+        do {
+            outcome = .done(try await client.compare(mode, model: model, query: query, texts: texts))
+        } catch {
+            outcome = Task.isCancelled ? .idle : .failed(TextComparison.failureMessage(for: error, mode: mode))
+        }
+        guard connections.contains(where: { $0.id == connectionID }) else { return }
+        sent.all.forEach { attach($0, to: connectionID) }
+        comparisons[connectionID] = outcome
+    }
+
+    /// The request of a connection's last Compare Texts run.
+    func comparisonExchange(of connectionID: UUID) -> Exchange? {
+        exchangeLog.exchanges(for: connectionID).last { $0.purpose == .embedding || $0.purpose == .rerank }
     }
 
     // MARK: Commands
@@ -977,4 +1021,13 @@ public final class ChatStore {
 
 private struct SummaryCutOff: LocalizedError {
     var errorDescription: String? { "The summary was cut off by the model's output limit." }
+}
+
+/// The requests a client reports while a call is still running.
+private final class SentExchanges: @unchecked Sendable {
+    private let lock = NSLock()
+    private var exchanges: [Exchange] = []
+
+    func add(_ exchange: Exchange) { lock.withLock { exchanges.append(exchange) } }
+    var all: [Exchange] { lock.withLock { exchanges } }
 }

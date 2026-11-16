@@ -69,6 +69,7 @@ public enum UISnapshot {
                   size: phone, appearance: appearance, to: file("resend"))
 
         try renderCheckModel(theme: theme, appearance: appearance, store: store, to: directory)
+        try renderCompareTexts(theme: theme, appearance: appearance, to: directory)
 
         let fetching = try DevToolsSnapshot.makeFetchStore(defaults: defaults, directory: scratch)
         try write(RootView(store: fetching), size: chatSize, appearance: appearance, to: file("fetch"))
@@ -101,6 +102,27 @@ public enum UISnapshot {
         try write(page(.done(report), open: true), size: phone, appearance: appearance, to: file("check-details"))
         try write(page(DevToolsSnapshot.failedCheck), size: phone, appearance: appearance, to: file("check-failed"))
         try write(page(.running), size: phone, appearance: appearance, to: file("check-running"))
+    }
+
+    /// The Compare Texts page before a run, with embeddings results, with rerank results, running, and after a 404.
+    @MainActor private static func renderCompareTexts(theme: Theme, appearance: NSAppearance?, to directory: URL) throws {
+        func page(_ state: ChatStore.Comparison, mode: TextComparison.Mode = .embeddings) -> some View {
+            NavigationStack {
+                TextComparisonPage(models: ["bge-small-en-v1.5", "jina-reranker-v1-tiny-en"], model: "bge-small-en-v1.5", mode: mode,
+                                   state: state, canInspect: true, run: { _, _, _, _ in }, inspect: {})
+                    .background(theme.palette.groupedBackground)
+            }
+            .theme(theme)
+        }
+        let cases: [(String, ChatStore.Comparison, TextComparison.Mode)] = [
+            ("compare", .idle, .embeddings), ("compare-embeddings", DevToolsSnapshot.embeddingsResult, .embeddings),
+            ("compare-rerank", DevToolsSnapshot.rerankResult, .rerank), ("compare-running", .running, .embeddings),
+            ("compare-failed", DevToolsSnapshot.notFound, .embeddings),
+        ]
+        for (name, state, mode) in cases {
+            try write(page(state, mode: mode), size: CGSize(width: 390, height: 900), appearance: appearance,
+                      to: directory.appendingPathComponent("\(theme.rawValue)-devtools-\(name).png"))
+        }
     }
 
     private static var sampleConversation: Conversation {
