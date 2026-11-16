@@ -12,6 +12,8 @@ struct Options {
     var prompt: String?
     var images: [String] = []
     var imageOut: String?
+    var aspect: ImageRequest.Aspect?
+    var longEdge: Int?
 }
 
 func write(_ text: String, to handle: FileHandle) {
@@ -23,7 +25,7 @@ func fail(_ message: String) -> Never {
     exit(1)
 }
 
-let usage = "usage: chatcli --base <url> [--key K] [--model M] [--models] [--efforts] [--title] [--effort <\(ReasoningEffort.allCases.map(\.rawValue).joined(separator: "|"))>] [--image <file>]... [--image-out <file>] \"prompt\""
+let usage = "usage: chatcli --base <url> [--key K] [--model M] [--models] [--efforts] [--title] [--effort <\(ReasoningEffort.allCases.map(\.rawValue).joined(separator: "|"))>] [--image <file>]... [--image-out <file> [--ar W:H] [--res N]] \"prompt\"\n  --image-out writes a picture from an image model, to probe the server. With --image it edits those photos. --ar picks the shape, such as 16:9. --res picks the long edge: 1k, 2k, 4k or 256 to 4096 pixels."
 
 func parseOptions(_ args: [String]) -> Options {
     var options = Options()
@@ -45,6 +47,16 @@ func parseOptions(_ args: [String]) -> Options {
             options.effort = effort
         case "--image": options.images.append(value(for: arg))
         case "--image-out": options.imageOut = value(for: arg)
+        case "--ar":
+            let raw = value(for: arg)
+            guard let aspect = ImageRequest.parseAspect(raw) else { fail("invalid --ar \(raw). expected W:H, such as 16:9") }
+            options.aspect = aspect
+        case "--res":
+            let raw = value(for: arg)
+            guard let longEdge = ImageRequest.parseLongEdge(raw) else {
+                fail("invalid --res \(raw). expected 1k, 2k, 4k or 256 to 4096")
+            }
+            options.longEdge = longEdge
         case "--models": options.listModels = true
         case "--title": options.titleOnly = true
         case "--efforts": options.listEfforts = true
@@ -77,20 +89,25 @@ func run(_ options: Options) async throws {
         return
     }
 
+    let store = ImageStore(directory: FileManager.default.temporaryDirectory.appendingPathComponent("chatcli-\(UUID())"))
+    defer { try? FileManager.default.removeItem(at: store.directory) }
+    let jpegs = try options.images.map { path in
+        guard let jpeg = ImageAttachment.jpeg(from: try Data(contentsOf: URL(fileURLWithPath: path))) else {
+            fail("\(path) is not an image")
+        }
+        return jpeg
+    }
+
     if let path = options.imageOut {
-        try await client.image(model: model, prompt: prompt).write(to: URL(fileURLWithPath: path))
+        let request = ImageRequest(prompt: prompt, aspect: options.aspect, longEdge: options.longEdge)
+        try await client.image(model: model, prompt: prompt, sources: jpegs,
+                               size: client.imageSize(for: request, source: jpegs.first))
+            .write(to: URL(fileURLWithPath: path))
         print("wrote \(path)")
         return
     }
 
-    let store = ImageStore(directory: FileManager.default.temporaryDirectory.appendingPathComponent("chatcli-\(UUID())"))
-    defer { try? FileManager.default.removeItem(at: store.directory) }
-    let images = try options.images.map { path in
-        guard let jpeg = ImageAttachment.jpeg(from: try Data(contentsOf: URL(fileURLWithPath: path))) else {
-            fail("\(path) is not an image")
-        }
-        return try store.save(jpeg)
-    }
+    let images = try jpegs.map { try store.save($0) }
 
     var wroteReasoning = false
     for try await event in client.stream(

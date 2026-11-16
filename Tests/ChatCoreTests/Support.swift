@@ -1,5 +1,8 @@
 @testable import ChatCore
+import CoreGraphics
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 
 // Kept separate from the Testing-importing files: the CLT toolchain lacks the
 // _Testing_Foundation overlay, which a file importing both would require.
@@ -37,6 +40,9 @@ final class StubServer: @unchecked Sendable {
     }
 
     var bodies: [[String: Any]] { lock.withLock { received } }
+    private var raw: [(path: String, contentType: String?, body: Data)] = []
+    /// Every request as sent, oldest first.
+    var requests: [(path: String, contentType: String?, body: Data)] { lock.withLock { raw } }
 
     var client: ChatClient {
         let configuration = URLSessionConfiguration.ephemeral
@@ -45,8 +51,8 @@ final class StubServer: @unchecked Sendable {
                           session: URLSession(configuration: configuration))
     }
 
-    fileprivate func handle(_ body: [String: Any]) -> Reply {
-        lock.withLock { received.append(body) }
+    fileprivate func handle(_ body: [String: Any], raw request: (path: String, contentType: String?, body: Data)) -> Reply {
+        lock.withLock { received.append(body); raw.append(request) }
         return respond(body)
     }
 }
@@ -69,7 +75,9 @@ final class StubProtocol: URLProtocol {
 
     override func startLoading() {
         let server = Self.lock.withLock { Self.servers[request.url?.host ?? ""] }!
-        let reply = server.handle(jsonObject(Self.body(of: request)) ?? [:])
+        let body = Self.body(of: request) ?? Data()
+        let reply = server.handle(jsonObject(body) ?? [:],
+                                  raw: (request.url?.path ?? "", request.value(forHTTPHeaderField: "Content-Type"), body))
         let response = HTTPURLResponse(url: request.url!, statusCode: reply.status, httpVersion: "HTTP/1.1",
                                        headerFields: ["Content-Type": "text/event-stream"])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
@@ -104,3 +112,13 @@ func makeImageStore() -> (store: ImageStore, cleanup: @Sendable () -> Void) {
 func fileSize(_ url: URL) -> Int { (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0 }
 
 func isJSONNull(_ value: Any?) -> Bool { value is NSNull }
+
+func makePNG(width: Int, height: Int) -> Data {
+    let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    let output = NSMutableData()
+    let destination = CGImageDestinationCreateWithData(output, UTType.png.identifier as CFString, 1, nil)!
+    CGImageDestinationAddImage(destination, context.makeImage()!, nil)
+    CGImageDestinationFinalize(destination)
+    return output as Data
+}

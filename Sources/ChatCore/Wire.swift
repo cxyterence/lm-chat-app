@@ -168,7 +168,25 @@ struct WireModelList: Decodable {
 struct WireImageRequest: Encodable {
     let model: String
     let prompt: String
+    let size: String?
     let n = 1
+}
+
+struct MultipartForm {
+    let boundary = "chat-\(UUID().uuidString)"
+    private(set) var body = Data()
+
+    mutating func field(_ name: String, _ value: String) {
+        body.append(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"\(name)\"\r\n\r\n\(value)\r\n".utf8))
+    }
+
+    mutating func jpeg(_ name: String, filename: String, _ data: Data) {
+        body.append(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"\(name)\"; filename=\"\(filename)\"\r\nContent-Type: image/jpeg\r\n\r\n".utf8))
+        body.append(data)
+        body.append(Data("\r\n".utf8))
+    }
+
+    var closed: Data { body + Data("--\(boundary)--\r\n".utf8) }
 }
 
 /// Each image arrives inline as base64 or as a link to fetch, depending on the server and model.
@@ -185,16 +203,16 @@ struct WireImageResponse: Decodable {
     let data: [Image]
 }
 
-/// Accepts both `{"error":{"message":...}}` and `{"error":"..."}`.
+/// Accepts `{"error":{"message":...}}`, `{"error":"..."}` and FastAPI's `{"detail":"..."}`.
 struct WireErrorEnvelope: Decodable {
     let message: String
 
-    private enum CodingKeys: String, CodingKey { case error }
+    private enum CodingKeys: String, CodingKey { case error, detail }
     private enum DetailKeys: String, CodingKey { case message }
 
     init(from decoder: Decoder) throws {
         let root = try decoder.container(keyedBy: CodingKeys.self)
-        if let text = try? root.decode(String.self, forKey: .error) {
+        if let text = (try? root.decode(String.self, forKey: .error)) ?? (try? root.decode(String.self, forKey: .detail)) {
             message = text
         } else {
             let detail = try root.nestedContainer(keyedBy: DetailKeys.self, forKey: .error)

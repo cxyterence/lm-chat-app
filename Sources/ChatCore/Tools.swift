@@ -73,7 +73,7 @@ public struct ToolCall: Codable, Equatable, Sendable, Identifiable {
     public var name: String
     /// JSON text exactly as the model wrote it.
     public var arguments: String
-    /// The MCP server that offers the tool, for display.
+    /// The MCP server that offers the tool, or the image connection for `generate_image`, for display.
     public var server: String
     public var result: Result?
 

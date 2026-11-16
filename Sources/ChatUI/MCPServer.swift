@@ -34,8 +34,9 @@ struct OfferedTool {
     var spec: ToolSpec { ToolSpec(name: name, description: tool.description, parameters: tool.inputSchema) }
 
     /// OpenAI allows letters, digits, `_` and `-`, up to 64 characters. Clashes take the server's name as a prefix.
+    /// The image tool's name is always taken, so no server's tool can answer to it.
     static func offer(_ servers: [(MCPServer, MCPClient, [MCPTool])]) -> [OfferedTool] {
-        var taken = Set<String>()
+        var taken: Set = [ImageRequest.toolName]
         var offered: [OfferedTool] = []
         for (server, client, tools) in servers {
             for tool in tools {
@@ -51,5 +52,34 @@ struct OfferedTool {
     private static func wireName(_ raw: String) -> String {
         String(String(raw.unicodeScalars.map { CharacterSet.alphanumerics.contains($0) && $0.isASCII || $0 == "-" ? Character($0) : "_" })
             .prefix(64))
+    }
+}
+
+/// A tool offered with one reply, by what runs it.
+enum ReplyTool {
+    case mcp(OfferedTool)
+    /// `generate_image`, which the app runs itself against the image model's own connection.
+    case image(connection: String, config: ServerConfig, model: String)
+
+    var name: String {
+        switch self {
+        case .mcp(let tool): tool.name
+        case .image: ImageRequest.toolName
+        }
+    }
+
+    var spec: ToolSpec {
+        switch self {
+        case .mcp(let tool): tool.spec
+        case .image: ImageRequest.toolSpec
+        }
+    }
+
+    /// Shown beside the call: the MCP server's name, or the image connection's.
+    var serverName: String {
+        switch self {
+        case .mcp(let tool): tool.server.name
+        case .image(let connection, _, _): connection
+        }
     }
 }

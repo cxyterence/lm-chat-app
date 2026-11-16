@@ -1,3 +1,4 @@
+import ChatCore
 import Foundation
 @testable import ChatUI
 
@@ -68,8 +69,14 @@ final class StubServer: @unchecked Sendable {
     /// Answers POST /v1/images/generations when set.
     nonisolated(unsafe) var image: (@Sendable ([String: Any]) -> Reply)?
     private var drawings: [[String: Any]] = []
+    private var credentials: [(path: String, authorization: String?)] = []
+    private var edits: [Data] = []
+    /// Raw multipart bodies of POST /v1/images/edits, answered by `image`.
+    var edited: [Data] { lock.withLock { edits } }
     /// Bodies of image requests, oldest first.
     var drawn: [[String: Any]] { lock.withLock { drawings } }
+    /// The Authorization header each request carried, oldest first.
+    var authorizations: [(path: String, authorization: String?)] { lock.withLock { credentials } }
     /// Answers requests to /mcp when set.
     nonisolated(unsafe) var mcp: FakeMCP?
     var root: URL { URL(string: "http://\(host)")! }
@@ -85,7 +92,8 @@ final class StubServer: @unchecked Sendable {
 
     var baseURL: URL { URL(string: "http://\(host)/v1")! }
 
-    fileprivate func handle(path: String, body: [String: Any]) -> Reply {
+    fileprivate func handle(path: String, authorization: String?, body: [String: Any], raw: Data) -> Reply {
+        lock.withLock { credentials.append((path, authorization)) }
         if path == "/search" {
             let query = body["q"] as? String ?? ""
             lock.withLock { queries.append(query) }
@@ -95,6 +103,10 @@ final class StubServer: @unchecked Sendable {
         if path.hasSuffix("images/generations"), let image {
             lock.withLock { drawings.append(body) }
             return image(body)
+        }
+        if path.hasSuffix("images/edits"), let image {
+            lock.withLock { edits.append(raw) }
+            return image([:])
         }
         guard path.hasSuffix("chat/completions"), body["stream"] as? Bool == true else { return (404, "") }
         if transcript(body).first?.text.hasPrefix("You name chat conversations") == true { return (200, sse(["Stub Title"])) }
@@ -135,7 +147,8 @@ final class StubProtocol: URLProtocol {
                                                                   headerFields: nil)!, cacheStoragePolicy: .notAllowed)
             return client!.urlProtocolDidFinishLoading(self)
         }
-        let body = Self.body(of: request).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let raw = Self.body(of: request) ?? Data()
+        let body = try? JSONSerialization.jsonObject(with: raw) as? [String: Any]
         if let mcp = server.mcp, request.url?.path.hasPrefix("/mcp") == true {
             let reply = mcp.handle(request, body: body ?? [:])
             let response = HTTPURLResponse(url: request.url!, statusCode: reply.status, httpVersion: "HTTP/1.1",
@@ -145,7 +158,8 @@ final class StubProtocol: URLProtocol {
             client?.urlProtocolDidFinishLoading(self)
             return
         }
-        let reply = server.handle(path: request.url?.path ?? "", body: body ?? [:])
+        let reply = server.handle(path: request.url?.path ?? "", authorization: request.value(forHTTPHeaderField: "Authorization"),
+                                  body: body ?? [:], raw: raw)
         let response = HTTPURLResponse(url: request.url!, statusCode: reply.status, httpVersion: "HTTP/1.1",
                                        headerFields: ["Content-Type": "text/event-stream"])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
@@ -202,6 +216,49 @@ func serperPage(_ titles: [String]) -> String {
 func useSerper(_ store: ChatStore, at server: StubServer) {
     store.defaults.set(server.root.absoluteString, forKey: "serperURL")
     store.setServiceKey(.serper, "test-key")
+}
+
+/// Saves `server` as a connection and picks `model` on it as the image tool, leaving the active connection as it was.
+@MainActor
+func useImageTool(_ store: ChatStore, at server: StubServer, model: String = "img", key: String = "image-key") {
+    let active = store.activeConnectionID
+    let connection = Connection(name: "images", baseURL: server.baseURL)
+    store.saveConnection(connection, apiKey: key)
+    store.activate(active)
+    store.setImageTool(ImageTool(connectionID: connection.id, model: model))
+}
+
+/// Real servers for the live test, read from the environment. Nil unless all six variables are set.
+struct LiveServers: Sendable {
+    let chatBase, chatKey, chatModel: String
+    let imageBase, imageKey, imageModel: String
+    /// Where the test writes the pictures it gets, when `LIVE_OUT_DIR` is set.
+    let outDirectory: URL?
+
+    static let current: LiveServers? = {
+        let env = ProcessInfo.processInfo.environment
+        guard let chatBase = env["LIVE_CHAT_BASE"], let chatKey = env["LIVE_CHAT_KEY"], let chatModel = env["LIVE_CHAT_MODEL"],
+              let imageBase = env["LIVE_IMAGE_BASE"], let imageKey = env["LIVE_IMAGE_KEY"], let imageModel = env["LIVE_IMAGE_MODEL"],
+              ![chatBase, chatModel, imageBase, imageModel].contains(where: \.isEmpty)
+        else { return nil }
+        return LiveServers(chatBase: chatBase, chatKey: chatKey, chatModel: chatModel,
+                           imageBase: imageBase, imageKey: imageKey, imageModel: imageModel,
+                           outDirectory: env["LIVE_OUT_DIR"].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) })
+    }()
+
+    /// A store set up as saved settings would be on launch, so no model-list refresh can swap the chat model.
+    @MainActor
+    func makeStore(defaults: UserDefaults, fileURL: URL) throws -> ChatStore {
+        let secrets = Secrets.memory()
+        let chat = Connection(name: "chat", baseURL: try ServerConfig.parse(baseURL: chatBase, apiKey: "").baseURL, model: chatModel)
+        let image = Connection(name: "images", baseURL: try ServerConfig.parse(baseURL: imageBase, apiKey: "").baseURL)
+        secrets.set(chat.secretAccount, chatKey)
+        secrets.set(image.secretAccount, imageKey)
+        defaults.set(try JSONEncoder().encode([chat, image] as [Connection]), forKey: "connections")
+        defaults.set(chat.id.uuidString, forKey: "activeConnection")
+        defaults.set(try JSONEncoder().encode(ImageTool(connectionID: image.id, model: imageModel)), forKey: "imageTool")
+        return ChatStore(defaults: defaults, fileURL: fileURL, secrets: secrets)
+    }
 }
 
 /// An MCP server over Streamable HTTP, to the spec: a token, a session, paged tools/list, tools/call.

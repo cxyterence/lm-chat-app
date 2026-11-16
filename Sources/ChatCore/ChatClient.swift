@@ -35,13 +35,27 @@ public struct ChatClient: Sendable {
     }
 
     /// Asks an image model for one picture and returns its bytes as the server encoded them.
-    public func image(model: String, prompt: String) async throws -> Data {
-        var request = URLRequest(url: config.baseURL.appendingPathComponent("images/generations"))
+    /// With `sources` (JPEGs) the model edits them, otherwise it draws from the prompt alone.
+    public func image(model: String, prompt: String, sources: [Data] = [], size: String? = nil) async throws -> Data {
+        var request = URLRequest(url: config.baseURL.appendingPathComponent(sources.isEmpty ? "images/generations" : "images/edits"))
         request.httpMethod = "POST"
         request.timeoutInterval = 600
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         authorize(&request)
-        request.httpBody = try JSONEncoder().encode(WireImageRequest(model: model, prompt: prompt))
+        if sources.isEmpty {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONEncoder().encode(WireImageRequest(model: model, prompt: prompt, size: size))
+        } else {
+            var form = MultipartForm()
+            form.field("model", model)
+            form.field("prompt", prompt)
+            form.field("n", "1")
+            if let size { form.field("size", size) }
+            for (index, source) in sources.enumerated() {
+                form.jpeg(sources.count == 1 ? "image" : "image[]", filename: "image\(index + 1).jpg", source)
+            }
+            request.setValue("multipart/form-data; boundary=\(form.boundary)", forHTTPHeaderField: "Content-Type")
+            request.httpBody = form.closed
+        }
 
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw ChatClientError.invalidResponse }
@@ -146,6 +160,13 @@ public struct ChatClient: Sendable {
             )
         )
         return request
+    }
+
+    /// The size to ask for. SGLang edits fail without one, so it defaults to the source's own. OpenAI's gpt-image
+    /// models take only a few fixed sizes, so there it is sent only when the request names a shape or size.
+    public func imageSize(for request: ImageRequest, source: Data?) -> String? {
+        if config.baseURL.host() == OpenAIModels.host && request.aspect == nil && request.longEdge == nil { return nil }
+        return request.size(source: source.flatMap(ImageAttachment.dimensions))
     }
 
     func authorize(_ request: inout URLRequest) {

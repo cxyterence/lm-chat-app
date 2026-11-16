@@ -57,6 +57,7 @@ public final class ChatStore {
         /// Points `/web-search` somewhere other than serper.dev, for testing against a local mock.
         static let serperURL = "serperURL"
         static let mcpServers = "mcpServers"
+        static let imageTool = "imageTool"
     }
 
     /// Rounds of tool use one reply may take before it must answer with what it has.
@@ -85,6 +86,7 @@ public final class ChatStore {
     private(set) var persistenceError: String?
     private(set) var mcpServers: [MCPServer] = []
     private(set) var mcpStatus: [UUID: MCPStatus] = [:]
+    private var savedImageTool: ImageTool?
     /// The tool call waiting for the user to allow or decline it.
     private(set) var awaitingApproval: String?
 
@@ -99,6 +101,8 @@ public final class ChatStore {
     @ObservationIgnored private var approvalContinuation: CheckedContinuation<Bool, Never>?
     /// Models whose server refused a request carrying tools. They're asked without tools from then on.
     @ObservationIgnored private var toolless: Set<String> = []
+    /// Models whose server takes tools only with reasoning off, as OpenAI's gpt-6-luna does.
+    @ObservationIgnored private var toolsNeedNoReasoning: Set<String> = []
 
     public convenience init() {
         self.init(defaults: .standard, fileURL: ChatStore.defaultFileURL, secrets: .keychain)
@@ -113,6 +117,7 @@ public final class ChatStore {
         preferredEffort = defaults.string(forKey: Keys.reasoningEffort).flatMap(ReasoningEffort.init(rawValue:))
         theme = defaults.string(forKey: Keys.theme).flatMap(Theme.init(rawValue:)) ?? .system
         loadConnections()
+        savedImageTool = defaults.data(forKey: Keys.imageTool).flatMap { try? JSONDecoder().decode(ImageTool.self, from: $0) }
         for service in APIService.allCases { serviceKeys[service] = secrets.get(service.secretAccount) }
         if let data = defaults.data(forKey: Keys.mcpServers),
            let saved = try? JSONDecoder().decode([MCPServer].self, from: data) {
@@ -147,17 +152,35 @@ public final class ChatStore {
     }
 
     var model: String { activeConnection?.model ?? "" }
-    /// Whether the selected model answers with a picture in place of text.
-    var makesImages: Bool { activeConnection?.makesImages ?? false }
     var systemPrompt: String { activeConnection?.systemPrompt ?? "" }
 
     func apiKey(for id: UUID) -> String { apiKeys[id] ?? "" }
 
     var isConfigured: Bool { config != nil }
 
-    var availableModels: [String] {
-        if case .loaded(let served) = models { return served.map(\.id) }
+    /// The models a chat can use. Image models are reached through `imageTool` instead.
+    private var chatModels: [ServedModel] {
+        if case .loaded(let served) = models { return served.filter { !$0.makesImages } }
         return []
+    }
+
+    var availableModels: [String] { chatModels.map(\.id) }
+
+    /// The image model the chat model can call. Unset when its connection has been deleted.
+    var imageTool: ImageTool? {
+        savedImageTool.flatMap { tool in connections.contains { $0.id == tool.connectionID } ? tool : nil }
+    }
+
+    func setImageTool(_ tool: ImageTool?) {
+        savedImageTool = tool
+        defaults.set(tool.flatMap { try? JSONEncoder().encode($0) }, forKey: Keys.imageTool)
+    }
+
+    /// The image models a saved connection serves, listed with that connection's own key.
+    func imageModels(of id: UUID) async throws -> [String] {
+        guard let connection = connections.first(where: { $0.id == id }) else { return [] }
+        let config = ServerConfig(baseURL: connection.baseURL, apiKey: apiKeys[id])
+        return try await ChatClient(config: config, session: session).models().filter(\.makesImages).map(\.id)
     }
 
     /// Adds a new connection or replaces the one with the same ID. A new one becomes active.
@@ -193,12 +216,9 @@ public final class ChatStore {
     }
 
     func selectModel(_ model: String) {
-        var makesImages = false
-        if case .loaded(let served) = models { makesImages = served.first { $0.id == model }?.makesImages ?? false }
         guard let index = connections.firstIndex(where: { $0.id == activeConnectionID }),
-              connections[index].model != model || connections[index].makesImages != makesImages else { return }
+              connections[index].model != model else { return }
         connections[index].model = model
-        connections[index].makesImages = makesImages
         persistConnections()
         checkEffortLevels()
     }
@@ -306,9 +326,9 @@ public final class ChatStore {
         defaults.set(try? JSONEncoder().encode(mcpServers), forKey: Keys.mcpServers)
     }
 
-    /// Every enabled server's tools, connecting to any not yet listed. A server that can't be reached is
-    /// left out so the reply still happens; Settings shows why.
-    private func offeredTools() async -> [OfferedTool] {
+    /// Every enabled server's tools, connecting to any not yet listed, then the image tool when one is set up.
+    /// A server that can't be reached is left out so the reply still happens; Settings shows why.
+    private func offeredTools() async -> [ReplyTool] {
         var found: [(MCPServer, MCPClient, [MCPTool])] = []
         for server in mcpServers where server.enabled {
             if case .ready(let tools) = mcpStatus[server.id] {
@@ -319,7 +339,12 @@ public final class ChatStore {
             if let tools = await connect(server) { found.append((server, mcpClient(for: server), tools)) }
         }
         liveReply?.status = nil
-        return OfferedTool.offer(found)
+        var tools = OfferedTool.offer(found).map(ReplyTool.mcp)
+        if let tool = imageTool, let connection = connections.first(where: { $0.id == tool.connectionID }) {
+            let config = ServerConfig(baseURL: connection.baseURL, apiKey: apiKeys[connection.id])
+            tools.append(.image(connection: connection.name, config: config, model: tool.model))
+        }
+        return tools
     }
 
     func resolveApproval(_ allowed: Bool) {
@@ -359,10 +384,6 @@ public final class ChatStore {
             effortLevels = .failed
             return
         }
-        guard !makesImages else {
-            effortLevels = .known([])
-            return
-        }
         let model = model
         effortLevels = .checking
         effortCheck = Task {
@@ -393,9 +414,8 @@ public final class ChatStore {
             let served = try await ChatClient(config: config, session: session).models()
             guard connectionID == activeConnectionID else { return }
             models = .loaded(served)
-            // Selecting the model again picks up whether the server says it makes images.
             let before = activeConnection
-            selectModel(served.contains { $0.id == model } ? model : served.first?.id ?? model)
+            selectModel(chatModels.contains { $0.id == model } ? model : chatModels.first?.id ?? model)
             if activeConnection == before { checkEffortLevels() }
         } catch {
             guard connectionID == activeConnectionID else { return }
@@ -467,7 +487,7 @@ public final class ChatStore {
         conversations[index].model = model
         conversations[index].messages.append(message)
         startStreaming(conversationID: id)
-        if isFirstPrompt && !message.content.isEmpty && !makesImages { generateTitle(for: id, prompt: message.content) }
+        if isFirstPrompt && !message.content.isEmpty { generateTitle(for: id, prompt: message.content) }
     }
 
     /// Replaces a sent message and asks again from there. Everything after it is erased, along with photos
@@ -515,6 +535,7 @@ public final class ChatStore {
         else { return }
         if request == .reply {
             guard let lastUser = conversations[index].messages.lastIndex(where: { $0.role == .user }) else { return }
+            images.remove(conversations[index].messages[(lastUser + 1)...].flatMap(\.images))
             conversations[index].messages.removeSubrange((lastUser + 1)...)
         }
         startStreaming(conversationID: id, request: request)
@@ -524,8 +545,7 @@ public final class ChatStore {
 
     /// Why a command can't run in the selected chat right now, or nil when it can.
     func unavailableReason(_ command: SlashCommand) -> String? {
-        if makesImages { return "Not available with an image model" }
-        return switch command {
+        switch command {
         case .compact:
             Compaction.hasNewMessages(selectedConversation?.messages ?? []) ? nil : "Nothing to compact yet"
         case .webSearch:
@@ -581,28 +601,24 @@ public final class ChatStore {
         let (model, effort, systemPrompt, images) = (model, reasoningEffort, systemPrompt, images)
         var current = first
         var outcome = Outcome.completed
-        if makesImages, request == .reply {
-            do {
-                try await draw(conversationID: id, into: first, model: model, client: client)
-            } catch {
-                outcome = Task.isCancelled ? .cancelled : .failed(error.localizedDescription)
-            }
-            return finish(conversationID: id, messageID: first, request: request, outcome: outcome)
-        }
         do {
             try await searchIfNeeded(conversationID: id)
             let tools = request == .reply ? await offeredTools() : []
+            let drawing = tools.contains { $0.name == ImageRequest.toolName }
             for round in 0... {
-                let history = conversations.first { $0.id == id }?.messages.filter { $0.id != current } ?? []
-                let wire = switch request {
+                let messages = conversations.first { $0.id == id }?.messages ?? []
+                let history = messages.filter { $0.id != current }
+                var wire = switch request {
                 case .reply: Compaction.context(of: history, systemPrompt: systemPrompt)
                 case .compact(let focus): Compaction.request(for: history, focus: focus)
                 }
+                if drawing { wire = ImageLabels.annotated(wire, order: ImageLabels.order(of: messages)) }
                 let offer = round < Self.maxToolRounds && !toolless.contains(model) ? tools : []
-                let calls = try await streamRound(client, model: model, effort: effort, images: images, wire: wire,
+                let roundEffort = !offer.isEmpty && toolsNeedNoReasoning.contains(model) ? ReasoningEffort.none : effort
+                let calls = try await streamRound(client, model: model, effort: roundEffort, images: images, wire: wire,
                                                   tools: offer, into: current, request: request)
                 guard !calls.isEmpty, !offer.isEmpty, !Task.isCancelled else { break }
-                await runTools(offer, for: current)
+                await runTools(offer, for: current, in: id)
                 guard !Task.isCancelled else { break }
                 commitLiveReply(to: current, in: id)
                 current = beginOutput(in: id, role: .assistant)
@@ -612,24 +628,6 @@ public final class ChatStore {
             outcome = Task.isCancelled ? .cancelled : .failed(error.localizedDescription)
         }
         finish(conversationID: id, messageID: current, request: request, outcome: outcome)
-    }
-
-    /// An image model sees only the newest message. It keeps no history, and photos sent with it are ignored.
-    private func draw(conversationID id: UUID, into messageID: UUID, model: String, client: ChatClient) async throws {
-        let prompt = conversations.first { $0.id == id }?.messages.last { $0.role == .user }?.content ?? ""
-        guard !prompt.isEmpty else { throw ImageFailure.noPrompt }
-        liveReply?.status = "Generating image…"
-        let bytes = try await client.image(model: model, prompt: prompt)
-        // Stored like every other photo, as a JPEG, large enough to save or share.
-        guard let jpeg = await Task.detached(operation: { ImageAttachment.jpeg(from: bytes, maxPixels: 2048) }).value else {
-            throw ImageFailure.unreadable
-        }
-        try Task.checkCancellation()
-        let image = try images.save(jpeg)
-        guard let c = conversations.firstIndex(where: { $0.id == id }),
-              let m = conversations[c].messages.firstIndex(where: { $0.id == messageID })
-        else { return images.remove([image]) }
-        conversations[c].messages[m].images = [image]
     }
 
     private func beginOutput(in id: UUID, role: Role) -> UUID {
@@ -644,10 +642,10 @@ public final class ChatStore {
 
     /// One request to the model. Returns the tools it called, also shown live as they arrive.
     private func streamRound(_ client: ChatClient, model: String, effort: ReasoningEffort?, images: ImageStore,
-                             wire: [ChatMessage], tools: [OfferedTool], into messageID: UUID,
+                             wire: [ChatMessage], tools: [ReplyTool], into messageID: UUID,
                              request: Request) async throws -> [ToolCall] {
         var calls = ToolCallAccumulator()
-        let servers = Dictionary(tools.map { ($0.name, $0.server.name) }, uniquingKeysWith: { first, _ in first })
+        let servers = Dictionary(tools.map { ($0.name, $0.serverName) }, uniquingKeysWith: { first, _ in first })
         do {
             for try await event in client.stream(model: model, messages: wire, reasoningEffort: effort, images: images,
                                                  tools: tools.map(\.spec)) {
@@ -667,7 +665,12 @@ public final class ChatStore {
                 case .done: break
                 }
             }
-        } catch ChatClientError.http(400, _) where !tools.isEmpty && liveReply?.content.isEmpty != false {
+        } catch ChatClientError.http(400, let message) where !tools.isEmpty && liveReply?.content.isEmpty != false {
+            if effort != .some(.none), message.localizedCaseInsensitiveContains("reasoning_effort") {
+                toolsNeedNoReasoning.insert(model)
+                return try await streamRound(client, model: model, effort: ReasoningEffort.none, images: images, wire: wire,
+                                             tools: tools, into: messageID, request: request)
+            }
             // Servers without tool support reject the whole request. Ask again without tools.
             toolless.insert(model)
             return try await streamRound(client, model: model, effort: effort, images: images, wire: wire,
@@ -676,13 +679,17 @@ public final class ChatStore {
         return liveReply?.toolCalls ?? []
     }
 
-    /// Runs each call in turn, asking first for any tool that isn't read-only. Results show as they land.
-    private func runTools(_ offered: [OfferedTool], for messageID: UUID) async {
+    /// Runs each call in turn, asking first for any MCP tool that isn't read-only. Results show as they land.
+    private func runTools(_ offered: [ReplyTool], for messageID: UUID, in id: UUID) async {
         guard let reply = liveReply, reply.messageID == messageID else { return }
         for index in reply.toolCalls.indices {
             let call = reply.toolCalls[index]
             let result: ToolCall.Result
-            if let tool = offered.first(where: { $0.name == call.name }) {
+            switch offered.first(where: { $0.name == call.name }) {
+            case .image(_, let config, let model)?:
+                // It only adds a picture to this chat, so it doesn't ask.
+                result = await generateImage(call, config: config, model: model, into: messageID, in: id)
+            case .mcp(let tool)?:
                 if !tool.tool.readOnly, !(await approve(call.id)) {
                     guard !Task.isCancelled else { return }
                     result = .init(text: "The user declined to run this tool.", isError: true)
@@ -693,12 +700,61 @@ public final class ChatStore {
                         result = .init(text: "The tool failed: \(error.localizedDescription)", isError: true)
                     }
                 }
-            } else {
+            case nil:
                 result = .init(text: "There is no tool named \(call.name).", isError: true)
             }
             guard !Task.isCancelled else { return }
             reply.toolCalls[index].result = result
         }
+    }
+
+    /// Draws or edits a picture for `generate_image` and attaches it to the message that asked. Whatever goes wrong
+    /// comes back as an error result, which the model reads to correct the call or explain.
+    private func generateImage(_ call: ToolCall, config: ServerConfig, model: String,
+                               into messageID: UUID, in id: UUID) async -> ToolCall.Result {
+        func failure(_ text: String) -> ToolCall.Result { .init(text: text, isError: true) }
+        let request: ImageRequest
+        do { request = try ImageRequest.parse(arguments: call.arguments) } catch { return failure(error.localizedDescription) }
+
+        let labels = ImageLabels.order(of: conversations.first { $0.id == id }?.messages ?? [])
+        var sources: [Data] = []
+        for label in request.sources {
+            guard labels.indices.contains(label - 1) else {
+                let have = labels.count == 1 ? "image 1" : "images 1 to \(labels.count)"
+                return failure(labels.isEmpty ? "There are no pictures in this chat to use as source_images."
+                                              : "There is no image \(label). The chat has \(have).")
+            }
+            guard let jpeg = images.data(for: labels[label - 1]) else { return failure("Image \(label) can't be read.") }
+            sources.append(jpeg)
+        }
+
+        liveReply?.status = sources.isEmpty ? "Generating image…" : "Editing image…"
+        defer { liveReply?.status = nil }
+        let client = ChatClient(config: config, session: session)
+        let bytes: Data
+        do {
+            bytes = try await client.image(model: model, prompt: request.prompt, sources: sources,
+                                           size: client.imageSize(for: request, source: sources.first))
+        } catch {
+            return failure("The image server failed: \(error.localizedDescription)")
+        }
+        // Stored like every other photo, as a JPEG, large enough to save or share.
+        guard let jpeg = await Task.detached(operation: { ImageAttachment.jpeg(from: bytes, maxPixels: 4096) }).value else {
+            return failure("The image server's reply wasn't a picture the app could read.")
+        }
+        guard !Task.isCancelled else { return failure("Stopped before the picture was saved.") }
+        let image: ImageID
+        do { image = try images.save(jpeg) } catch { return failure("The picture couldn't be saved: \(error.localizedDescription)") }
+        guard let c = conversations.firstIndex(where: { $0.id == id }),
+              let m = conversations[c].messages.firstIndex(where: { $0.id == messageID })
+        else {
+            images.remove([image])
+            return failure("The message this picture was for no longer exists.")
+        }
+        conversations[c].messages[m].images.append(image)
+        let label = ImageLabels.order(of: conversations[c].messages).firstIndex(of: image)! + 1
+        let size = ImageAttachment.dimensions(of: jpeg).map { " (\($0.width)x\($0.height))" } ?? ""
+        return .init(text: "Created image \(label)\(size). It is shown to the user.")
     }
 
     private func commitLiveReply(to messageID: UUID, in id: UUID) {
@@ -743,17 +799,6 @@ public final class ChatStore {
             persistenceError = nil
         } catch {
             persistenceError = "Couldn't save chats: \(error.localizedDescription)"
-        }
-    }
-}
-
-private enum ImageFailure: LocalizedError {
-    case noPrompt, unreadable
-
-    var errorDescription: String? {
-        switch self {
-        case .noPrompt: "Describe the picture you want. Image models need a text prompt."
-        case .unreadable: "The server's reply wasn't a picture the app could read."
         }
     }
 }

@@ -12,11 +12,15 @@ On mock-reasoning, "/huge" streams ~20k characters of reasoning then ~6k of Mark
 "/spans" streams inline formatting slowly, three characters at a time, to show half-finished spans.
 Image parts are acknowledged with their sizes, except by mock-think, which rejects them like a text-only model.
 mock-image is listed the way SGLang lists a diffusion model and answers /v1/images/generations with a PNG.
+It also answers multipart /v1/images/edits when the request has a prompt and an `image` or `image[]` file.
+Both take `size` ("WxH") and answer with a PNG that big. Like SGLang, an edit without a size is refused.
 "draw fail" is refused. Set MOCK_IMAGE_LINKS=1 to answer with a link to fetch, as SGLang can, in place of base64.
 Set MOCK_API_KEY to require `Authorization: Bearer <key>`. Set MOCK_EXTRA_MODELS=96 to list a long model list like OpenAI's.
 """
 import argparse
 import base64
+from email.parser import BytesParser
+from email.policy import HTTP
 from itertools import takewhile
 import re
 import json
@@ -146,7 +150,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorized():
             return
         if self.path.rstrip("/") == "/v1/models":
-            image = {"id": IMAGE_MODEL, "object": "model", "task_type": "t2i", "supported_task_types": ["t2i"]}
+            image = {"id": IMAGE_MODEL, "object": "model", "task_type": "t2i", "supported_task_types": ["t2i", "ti2i"]}
             self.send_json(200, {"object": "list",
                                  "data": [{"id": m, "object": "model"} for m in MODELS] + [image]})
         elif re.fullmatch(r"/v1/images/[^/]+/content", self.path):
@@ -218,15 +222,40 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def image(self, body):
+    def image(self, body, edit=False):
         if not body.get("prompt"):
             return self.send_json(400, {"error": {"message": "prompt is required"}})
         if "fail" in body["prompt"]:
             return self.send_json(400, {"error": {"message": "Your request was rejected by the safety system."}})
+        size = body.get("size")
+        match = re.fullmatch(r"(\d+)x(\d+)", size) if size is not None else None
+        if size is not None and not (match and 0 < int(match[1]) <= 4096 and 0 < int(match[2]) <= 4096):
+            return self.send_json(400, {"detail": f"invalid size {size!r}"})
+        if edit and size is None:
+            return self.send_json(400, {"detail": "target.width must be an integer"})
         time.sleep(float(os.environ.get("MOCK_IMAGE_SECONDS", "2")))
         if os.environ.get("MOCK_IMAGE_LINKS"):
             return self.send_json(200, {"created": int(time.time()), "data": [{"url": "/v1/images/mock/content"}]})
-        self.send_json(200, {"created": int(time.time()), "data": [{"b64_json": base64.b64encode(png()).decode()}]})
+        picture = png(int(match[1]), int(match[2])) if match else png()
+        self.send_json(200, {"created": int(time.time()), "data": [{"b64_json": base64.b64encode(picture).decode()}]})
+
+    def edit(self):
+        raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        message = BytesParser(policy=HTTP).parsebytes(
+            b"Content-Type: " + self.headers.get("Content-Type", "").encode() + b"\r\n\r\n" + raw)
+        fields, files = {}, []
+        for part in message.iter_parts() if message.is_multipart() else []:
+            name = part.get_param("name", header="content-disposition")
+            if part.get_filename() is not None:
+                if name in ("image", "image[]"):
+                    files.append(part.get_payload(decode=True))
+            elif name:
+                fields[name] = part.get_content()
+        if not fields.get("prompt"):
+            return self.send_json(400, {"error": {"message": "prompt is required"}})
+        if not files:
+            return self.send_json(400, {"error": {"message": "at least one image is required"}})
+        self.image(fields, edit=True)
 
     def do_POST(self):
         if self.path.rstrip("/") == "/search":
@@ -235,6 +264,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.mcp()
         if not self.authorized():
             return
+        if self.path.rstrip("/") == "/v1/images/edits":
+            return self.edit()
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
         if self.path.rstrip("/") == "/v1/images/generations":
             return self.image(body)

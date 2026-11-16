@@ -25,7 +25,7 @@ struct ChatView: View {
                 ErrorBanner(message: message, retry: store.retry, dismiss: store.dismissFailure)
             }
             Composer(draft: $draft, images: $draftImages, store: store.images, focused: $composerFocused, streaming: streaming,
-                     canSend: store.canSend, imageModel: store.makesImages, editing: editing != nil, unavailable: store.unavailableReason,
+                     canSend: store.canSend, editing: editing != nil, unavailable: store.unavailableReason,
                      send: send, stop: store.stop, cancelEdit: cancelEdit)
         }
         .foregroundStyle(palette.text)
@@ -240,17 +240,15 @@ private struct AssistantBubble: View {
                     }
                 }
             }
-            if content.isEmpty && isStreaming && reasoning.isEmpty && toolCalls.isEmpty {
-                if let status = reply?.status {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text(status).font(.callout).foregroundStyle(palette.secondaryText)
-                    }
-                    .padding(.vertical, 4)
-                    .transition(.opacity)
-                } else {
-                    TypingDots().transition(.opacity)
+            if isStreaming, let status = reply?.status {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(status).font(.callout).foregroundStyle(palette.secondaryText)
                 }
+                .padding(.vertical, 4)
+                .transition(.opacity)
+            } else if content.isEmpty && isStreaming && reasoning.isEmpty && toolCalls.isEmpty {
+                TypingDots().transition(.opacity)
             }
         }
         .contextMenu {
@@ -638,8 +636,6 @@ private struct Composer: View {
     var focused: FocusState<Bool>.Binding
     let streaming: Bool
     let canSend: Bool
-    /// An image model takes a description and no photos.
-    let imageModel: Bool
     let editing: Bool
     let unavailable: (SlashCommand) -> String?
     let send: () -> Void
@@ -668,14 +664,14 @@ private struct Composer: View {
             if !images.isEmpty || loading > 0 { attachments }
             HStack(alignment: .bottom, spacing: 8) {
                 let plus = CircleIcon(systemImage: "plus", size: height,
-                                      foreground: room > 0 && !imageModel ? palette.text : palette.secondaryText,
+                                      foreground: room > 0 ? palette.text : palette.secondaryText,
                                       background: palette.fill)
                 PhotosPicker(selection: $picks, maxSelectionCount: max(room, 1), selectionBehavior: .ordered,
                              matching: .images) {
                     Label { Text("Add Photos") } icon: { plus }.labelStyle(.iconOnly)
                 }
-                .disabled(room <= 0 || imageModel)
-                TextField(imageModel ? "Describe an image" : "Message", text: $draft, axis: .vertical)
+                .disabled(room <= 0)
+                TextField("Message", text: $draft, axis: .vertical)
                     .lineLimit(1...6)
                     .focused(focused)
                     .textFieldStyle(.plain)

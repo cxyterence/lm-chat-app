@@ -2,13 +2,14 @@ import ChatCore
 import SwiftUI
 
 enum SettingsPage: String, CaseIterable, Identifiable {
-    case connections, apiKeys, mcp, appearance
+    case connections, apiKeys, mcp, imageTool, appearance
 
     var id: Self { self }
     var title: String {
         switch self {
         case .apiKeys: "API Keys"
         case .mcp: "MCP Connections"
+        case .imageTool: "Image Generation"
         default: rawValue.capitalized
         }
     }
@@ -17,6 +18,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         case .connections: "network"
         case .apiKeys: "key"
         case .mcp: "point.3.connected.trianglepath.dotted"
+        case .imageTool: "photo"
         case .appearance: "paintpalette"
         }
     }
@@ -71,6 +73,7 @@ struct SettingsView: View {
                     case .connections: ConnectionsSettings(store: store) { path.append($0) }
                     case .apiKeys: APIKeysSettings(store: store)
                     case .mcp: MCPSettings(store: store) { path.append($0) }
+                    case .imageTool: ImageToolSettings(store: store)
                     case .appearance: AppearanceSettings(store: store)
                     }
                 }
@@ -98,6 +101,7 @@ struct SettingsView: View {
             store.mcpServers.filter(\.enabled).map(\.name).joined(separator: ", ")
         case .apiKeys:
             APIService.allCases.filter { !store.serviceKey($0).isEmpty }.map(\.name).joined(separator: ", ")
+        case .imageTool: store.imageTool?.model ?? ""
         case .appearance: store.theme.name
         }
     }
@@ -350,6 +354,80 @@ private struct ServiceKeyRow: View {
         }
         .listRowBackground(palette.surface)
         .onAppear { key = store.serviceKey(service) }
+    }
+}
+
+/// Picks the image model that chat models draw with, from the image models a saved connection serves.
+struct ImageToolSettings: View {
+    private enum Listing {
+        case loading
+        case models([String])
+        case failed(String)
+    }
+
+    let store: ChatStore
+    @State private var connection: UUID?
+    @State private var listing = Listing.loading
+    @Environment(\.palette) private var palette
+
+    init(store: ChatStore) {
+        self.store = store
+        _connection = State(initialValue: store.imageTool?.connectionID)
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                Picker("Connection", selection: $connection) {
+                    Text("None").tag(UUID?.none)
+                    ForEach(store.connections) { Text($0.name).tag(UUID?.some($0.id)) }
+                }
+                if let connection { models(of: connection) }
+            } footer: {
+                Text("A chat model that supports tool calling can draw with this image model when you ask for a picture, and edit the photos you attach. The image model needs no chat of its own.")
+            }
+            .listRowBackground(palette.surface)
+        }
+        .formStyle(.grouped)
+        .foregroundStyle(palette.text)
+        .scrollContentBackground(.hidden)
+        .task(id: connection) { await load() }
+    }
+
+    @ViewBuilder private func models(of connection: UUID) -> some View {
+        switch listing {
+        case .loading:
+            HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Loading models…") }
+                .font(.callout).foregroundStyle(palette.secondaryText)
+        case .failed(let message):
+            Text(message).font(.callout).foregroundStyle(palette.danger)
+        case .models(let names) where names.isEmpty:
+            Text("This server lists no image models.").font(.callout).foregroundStyle(palette.secondaryText)
+        case .models(let names):
+            Picker("Model", selection: Binding(
+                get: { store.imageTool?.model ?? "" },
+                set: { store.setImageTool(ImageTool(connectionID: connection, model: $0)) }
+            )) {
+                ForEach(names, id: \.self) { Text($0).tag($0) }
+            }
+        }
+    }
+
+    /// Lists the picked connection's image models. A connection newly picked starts with the first of them.
+    private func load() async {
+        guard let id = connection else { return store.setImageTool(nil) }
+        listing = .loading
+        var names: [String] = []
+        do {
+            names = try await store.imageModels(of: id)
+            listing = .models(names)
+        } catch {
+            listing = .failed(error.localizedDescription)
+        }
+        guard !Task.isCancelled else { return }
+        if store.imageTool?.connectionID != id {
+            store.setImageTool(names.first.map { ImageTool(connectionID: id, model: $0) })
+        }
     }
 }
 
