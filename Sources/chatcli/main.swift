@@ -8,6 +8,7 @@ struct Options {
     var listModels = false
     var titleOnly = false
     var listEfforts = false
+    var capabilities = false
     var inspect = false
     var effort: ReasoningEffort?
     var prompt: String?
@@ -69,7 +70,32 @@ func printExchanges() {
     }
 }
 
-let usage = "usage: chatcli --base <url> [--key K] [--model M] [--models] [--efforts] [--inspect] [--title] [--effort <\(ReasoningEffort.allCases.map(\.rawValue).joined(separator: "|"))>] [--image <file>]... [--image-out <file> [--ar W:H] [--res N]] \"prompt\"\n  --inspect prints every request made, with status, timing, tokens and a curl command, after the reply.\n  --image-out writes a picture from an image model, to probe the server. With --image it edits those photos. --ar picks the shape, such as 16:9. --res picks the long edge: 1k, 2k, 4k or 256 to 4096 pixels."
+func printReport(_ report: CapabilityReport, model: String) {
+    func describe(_ tools: ToolSupport) -> String {
+        switch tools {
+        case .yes: "yes"
+        case .onlyWithReasoningOff: "only with reasoning off"
+        case .no(let reason): "no (\(reason))"
+        case .unknown(let reason): "unknown (\(reason))"
+        }
+    }
+    func describe(_ support: Support) -> String {
+        switch support {
+        case .yes: "yes"
+        case .no(let reason): "no (\(reason))"
+        case .unknown(let reason): "unknown (\(reason))"
+        }
+    }
+    print("model: \(model)")
+    print("tools: \(describe(report.tools))")
+    print("vision: \(describe(report.vision))")
+    print("reasoning efforts: \(report.efforts.isEmpty ? "not adjustable" : report.efforts.map(\.rawValue).joined(separator: " "))")
+    print("context length: \(report.contextLength.map(String.init) ?? "not reported")")
+    print(report.server.isEmpty ? "server: nothing reported" : "server:")
+    report.server.forEach { print("  \($0.name): \($0.value)") }
+}
+
+let usage = "usage: chatcli --base <url> [--key K] [--model M] [--models] [--efforts] [--capabilities] [--inspect] [--title] [--effort <\(ReasoningEffort.allCases.map(\.rawValue).joined(separator: "|"))>] [--image <file>]... [--image-out <file> [--ar W:H] [--res N]] \"prompt\"\n  --capabilities checks what --model supports: tools, vision, reasoning levels, context length. --inspect prints every request made, with status, timing, tokens and a curl command, after the reply.\n  --image-out writes a picture from an image model, to probe the server. With --image it edits those photos. --ar picks the shape, such as 16:9. --res picks the long edge: 1k, 2k, 4k or 256 to 4096 pixels."
 
 func parseOptions(_ args: [String]) -> Options {
     var options = Options()
@@ -104,6 +130,7 @@ func parseOptions(_ args: [String]) -> Options {
         case "--models": options.listModels = true
         case "--title": options.titleOnly = true
         case "--efforts": options.listEfforts = true
+        case "--capabilities": options.capabilities = true
         case "--inspect": options.inspect = true
         case "-h", "--help": print(usage); exit(0)
         default: options.prompt = arg
@@ -127,6 +154,10 @@ func run(_ options: Options) async throws {
     if options.listEfforts {
         let levels = try await client.reasoningEfforts(model: model)
         print(levels.isEmpty ? "(not adjustable)" : levels.map(\.rawValue).joined(separator: " "))
+        return
+    }
+    if options.capabilities {
+        printReport(try await client.capabilities(model: model), model: model)
         return
     }
     guard let prompt = options.prompt else { fail("a prompt is required\n\(usage)") }

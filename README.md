@@ -55,12 +55,14 @@ The mock server also speaks MCP at `/mcp` (all tools) and `/mcp/readonly`, with 
 swift run chatcli --base 127.0.0.1:1234 --models
 swift run chatcli --base 127.0.0.1:1234 --model <id> [--key K] [--effort low] "Hello"
 swift run chatcli --base 127.0.0.1:1234 --model <id> --efforts
+swift run chatcli --base 127.0.0.1:1234 --model <id> --capabilities
+swift run chatcli --base 127.0.0.1:1234 --model <id> --inspect "Hello"
 swift run chatcli --base 127.0.0.1:1234 --title "what is NVFP4?"
 swift run chatcli --base 127.0.0.1:1234 --model <id> --image photo.heic "What is in this photo?"
 swift run chatcli --base 127.0.0.1:8099 --model mock-image --image-out out.png --ar 16:9 --res 1280 "a red fox in snow"
 ```
 
-Reasoning goes to stderr dimmed, the answer to stdout. Failures exit non-zero. `--title` prints the title the app would give a chat starting with that prompt. `--efforts` prints the reasoning effort levels the model accepts, the same check the app runs before showing its effort slider. `--image` attaches a photo, prepared the way the app prepares one, and can repeat. `--image-out <file>` probes an image server. It sends the prompt straight to the image model, with no chat model or tool in between, and writes the picture it returns. Add `--image` and the model edits those photos instead. `--ar W:H` picks the shape and `--res N` the long edge, as in `--ar 16:9 --res 1280`. `--res` takes `1k`, `2k`, `4k`, or 256 to 4096 pixels.
+Reasoning goes to stderr dimmed, the answer to stdout. Failures exit non-zero. `--title` prints the title the app would give a chat starting with that prompt. `--efforts` prints the reasoning effort levels the model accepts, the same check the app runs before showing its effort slider. `--capabilities` asks the model whether it takes tools and pictures, which reasoning levels it accepts and how much context it has, with a handful of one-token requests. `--inspect` adds every request the run made, after the reply: status, timing, token counts, then a `curl` command that repeats it with `$API_KEY` for the key. `--image` attaches a photo, prepared the way the app prepares one, and can repeat. `--image-out <file>` probes an image server. It sends the prompt straight to the image model, with no chat model or tool in between, and writes the picture it returns. Add `--image` and the model edits those photos instead. `--ar W:H` picks the shape and `--res N` the long edge, as in `--ar 16:9 --res 1280`. `--res` takes `1k`, `2k`, `4k`, or 256 to 4096 pixels.
 
 ## Smoke test against your server
 
