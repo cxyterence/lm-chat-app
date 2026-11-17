@@ -4,8 +4,8 @@
 #   UDID=<simulator> scripts/background_check.sh
 # Other settings: SOURCE_DIR (the checkout to build, default this one), WORK (scratch folder), PORT (default 8188),
 # SLOW_SECONDS (length of the streamed reply, default 25), LONG_SECONDS (the long case's reply, default 75),
-# ONLY=kept, long, killed or dropped to run one case (long prints SKIP where the system refuses continued processing
-# tasks, as the iOS 27.2 simulator does),
+# ONLY=kept, long, killed or dropped to run one case (long prints SKIP on the simulator, which refuses continued
+# processing tasks, and needs a real device),
 # SCREENSHOT and DROPPED_SCREENSHOT (where the relaunched app and the app after a dropped stream are captured).
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -140,7 +140,7 @@ PY
     if [ "$short" = 3 ]; then
         result "$label" fail "the reply finished too soon after leaving for this case to prove anything"
     elif [ -n "$refusal" ] && [ "${3:-}" != true ]; then
-        echo "SKIP $label: the system refused the continued processing task ($refusal), so only the 30s grant covered the reply and it was cut at $1 characters (interrupted: ${2:-false}). Run this case where the system accepts the task."
+        echo "SKIP $label: the simulator refuses continued processing tasks ($refusal), so only the 30s grant covered the reply and it was cut at $1 characters (interrupted: ${2:-false}). This case needs a real device, which this script cannot drive."
     elif grep -q "stream complete.*the client closed the connection" "$MOCK_LOG" && [ "${3:-}" = true ] && [ "${2:-}" = false ]; then
         result "$label" ok "the app read the mock's whole stream while in the background and saved the whole reply ($1 characters)"
     else
