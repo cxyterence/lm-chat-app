@@ -98,6 +98,7 @@ public final class ChatStore {
     static let partialSaveInterval: TimeInterval = 2
 
     static let backgroundFailure = "The reply stopped while the app was in the background."
+    static let systemStopped = "The system stopped the reply in the background."
 
     /// Settings from before connections existed, read once to build the first connection.
     private enum LegacyKeys {
@@ -153,6 +154,8 @@ public final class ChatStore {
     @ObservationIgnored private let writer = DispatchQueue(label: "ChatStore.writer")
     /// Whether the app left the screen while the current reply streamed.
     @ObservationIgnored private var leftWhileStreaming = false
+    /// Whether the system ended the continued task, which stops the reply.
+    @ObservationIgnored private var stoppedBySystem = false
     @ObservationIgnored private var effortCheck: Task<Void, Never>?
     @ObservationIgnored private let fileURL: URL
     @ObservationIgnored let images: ImageStore
@@ -630,8 +633,14 @@ public final class ChatStore {
         guard cover == nil, case .streaming(let id, _) = generation,
               conversations.first(where: { $0.id == id })?.messages.last?.role == .assistant
         else { return }
-        cover = background.cover { [weak self] in self?.stop() }
+        cover = background.cover { [weak self] in self?.systemEndedReply() }
         cover?.update(charactersReceived)
+    }
+
+    private func systemEndedReply() {
+        guard case .streaming = generation else { return }
+        stoppedBySystem = true
+        stop()
     }
 
     private var charactersReceived: Int { liveReply.map { $0.content.count + $0.reasoning.count } ?? 0 }
@@ -850,6 +859,7 @@ public final class ChatStore {
         guard let config, conversations.contains(where: { $0.id == id }) else { return }
         releaseFailedReply()
         leftWhileStreaming = false
+        stoppedBySystem = false
         let first = beginOutput(in: id, role: request == .reply ? .assistant : .summary)
         let task = Task { await generate(conversationID: id, request: request, first: first, config: config) }
         generation = .streaming(conversationID: id, task: task)
@@ -902,6 +912,7 @@ public final class ChatStore {
             let message = leftWhileStreaming && error is URLError ? Self.backgroundFailure : error.localizedDescription
             outcome = Task.isCancelled ? .cancelled : .failed(message)
         }
+        if stoppedBySystem, outcome == .cancelled { outcome = .failed(Self.systemStopped) }
         finish(conversationID: id, messageID: current, request: request, outcome: outcome)
     }
 

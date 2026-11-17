@@ -435,7 +435,7 @@ struct BackgroundReplyTests {
         #expect(s.store.selectedConversation?.messages.last?.content == "Hello ")
     }
 
-    @Test func cancellingFromTheSystemStopsTheReplyLikeStopAndKeepsTheText() async throws {
+    @Test func whenTheSystemEndsTheTaskTheReplyFailsKeepsTheTextAndCanBeRetried() async throws {
         let s = setUp()
         defer { s.rig.cleanup() }
         await startReply(s)
@@ -447,13 +447,19 @@ struct BackgroundReplyTests {
         s.fake.cancelFromSystem()
         await untilIdle(s.store)
 
-        #expect(!s.store.isBusy)
-        let message = try #require(s.store.selectedConversation?.messages.last)
-        #expect(message.content == "Hello so far ")
-        #expect(s.store.failureMessage(for: try #require(s.store.selectedConversation?.id)) == nil)
+        let id = try #require(s.store.selectedConversation?.id)
+        #expect(s.store.failureMessage(for: id) == ChatStore.systemStopped)
+        #expect(s.store.selectedConversation?.messages.last?.content == "Hello so far ")
         let saved = try #require(try savedReply(s))
         #expect(saved.content == "Hello so far " && !saved.interrupted)
-        #expect(s.fake.coverFinishes == [true])
+        #expect(s.fake.coverFinishes == [false])
+
+        s.script.body = sse(["Second try"])
+        s.server.holdsStreamsOpen = false
+        s.store.retry()
+        await untilIdle(s.store)
+        #expect(s.store.failureMessage(for: id) == nil)
+        #expect(s.store.selectedConversation?.messages.map(\.content).suffix(2) == ["hi", "Second try"])
     }
 
     @Test func comingBackToTheAppEndsTheTaskAndTheReplyCarriesOn() async {
