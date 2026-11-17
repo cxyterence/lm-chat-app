@@ -156,6 +156,8 @@ public final class ChatStore {
     @ObservationIgnored private var leftWhileStreaming = false
     /// Whether the system ended the continued task, which stops the reply.
     @ObservationIgnored private var stoppedBySystem = false
+    /// Characters of the rounds of this reply that are already finished.
+    @ObservationIgnored private var finishedRoundCharacters = 0
     @ObservationIgnored private var effortCheck: Task<Void, Never>?
     @ObservationIgnored private let fileURL: URL
     @ObservationIgnored let images: ImageStore
@@ -643,7 +645,8 @@ public final class ChatStore {
         stop()
     }
 
-    private var charactersReceived: Int { liveReply.map { $0.content.count + $0.reasoning.count } ?? 0 }
+    /// Everything the reply has written, tool rounds included, so the task's progress only goes forward.
+    private var charactersReceived: Int { finishedRoundCharacters + (liveReply.map { $0.content.count + $0.reasoning.count } ?? 0) }
 
     /// Saves what has arrived and asks iOS for time to keep the reply coming. The grant is asked for even when a task
     /// covers the reply, since a task the system queues may not start for a while.
@@ -860,6 +863,7 @@ public final class ChatStore {
         releaseFailedReply()
         leftWhileStreaming = false
         stoppedBySystem = false
+        finishedRoundCharacters = 0
         let first = beginOutput(in: id, role: request == .reply ? .assistant : .summary)
         let task = Task { await generate(conversationID: id, request: request, first: first, config: config) }
         generation = .streaming(conversationID: id, task: task)
@@ -904,6 +908,7 @@ public final class ChatStore {
                 await runTools(offer, for: current, in: id)
                 guard !Task.isCancelled else { break }
                 commitLiveReply(to: current, in: id)
+                finishedRoundCharacters = charactersReceived
                 current = beginOutput(in: id, role: .assistant)
             }
             if Task.isCancelled { outcome = .cancelled }

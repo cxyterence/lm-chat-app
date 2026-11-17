@@ -371,6 +371,36 @@ struct BackgroundReplyTests {
         #expect(s.fake.coverUpdates == [6, "Hello too soon later".count])
     }
 
+    @Test func theTaskHearsOfAllTheTextOfAReplyThatTakesSeveralToolRounds() async {
+        let held = { @Sendable (text: String) in sse([text]).replacingOccurrences(of: "data: [DONE]\n\n", with: "") }
+        let host = Script("")
+        let server = StubServer { body in
+            if lastRole(body) == "tool" { return (200, held("ok ")) }
+            guard offeredTools(body).contains("fetch_url") else { return (200, held("no tool")) }
+            let arguments = String(decoding: try! JSONSerialization.data(withJSONObject: ["url": host.body]), as: UTF8.self)
+            return (200, held("A longer first round ") + toolCallReply("fetch_url", arguments: arguments))
+        }
+        host.body = server.pageURL().absoluteString
+        server.holdsStreamsOpen = true
+        server.page = { _ in (200, "text/html", "<p>page</p>") }
+        let fake = FakeBackgroundTime(), clock = Clock()
+        let rig = Rig(server: server, background: fake.time, now: { clock.now })
+        defer { rig.cleanup() }
+        rig.store.setFetchesPages(true)
+        rig.store.send("read \(host.body)")
+        await streamed(rig.store, "A longer first round ")
+        rig.store.appWillLeave()
+        rig.store.appMovedToBackground()
+        let first = "A longer first round ".count
+
+        await until { rig.store.liveReply?.content == "ok " }
+        clock.advance(2.5)
+        server.deliver(["more"])
+        await streamed(rig.store, "ok more")
+
+        #expect(fake.coverUpdates == [first, first + "ok more".count], "the second round adds to the first")
+    }
+
     @Test func theGrantIsAskedForAlongsideTheTaskAndWhenTheSystemRefusesTheTaskTheReplyStillGetsIt() async {
         let held = setUp()
         defer { held.rig.cleanup() }

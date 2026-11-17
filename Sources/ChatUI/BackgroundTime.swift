@@ -104,9 +104,7 @@ private final class ContinuedReply {
     }
 
     private func update(_ characters: Int) {
-        // A reply that asks for tools starts over in a new message, and progress must not go back.
-        self.characters = max(self.characters, characters)
-        let characters = self.characters
+        self.characters = characters
         guard case .running(let task) = state else { return }
         let (completed, total) = ReplyCover.progress(characters: characters)
         task.progress.totalUnitCount = total
