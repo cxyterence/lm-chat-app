@@ -89,6 +89,7 @@ public final class ChatStore {
         static let mcpServers = "mcpServers"
         static let imageTool = "imageTool"
         static let fetchPages = "fetchPages"
+        static let continueLongReplies = "continueLongReplies"
     }
 
     /// Rounds of tool use one reply may take before it must answer with what it has.
@@ -140,6 +141,9 @@ public final class ChatStore {
     private var savedImageTool: ImageTool?
     /// Whether `fetch_url` is offered with every reply. Off until the user turns it on.
     private(set) var fetchesPages: Bool
+    /// Whether a reply may ask iOS for a continued processing task. Off until someone turns it on, since it has only
+    /// ever run where the system refuses such tasks.
+    private(set) var continuesLongReplies: Bool
     /// The tool call waiting for the user to allow or decline it.
     private(set) var awaitingApproval: String?
 
@@ -192,6 +196,7 @@ public final class ChatStore {
         self.session = session
         self.pages = pages
         fetchesPages = defaults.bool(forKey: Keys.fetchPages)
+        continuesLongReplies = defaults.bool(forKey: Keys.continueLongReplies)
         images = ImageStore(directory: fileURL.deletingLastPathComponent().appendingPathComponent("images"))
         preferredEffort = defaults.string(forKey: Keys.reasoningEffort).flatMap(ReasoningEffort.init(rawValue:))
         theme = defaults.string(forKey: Keys.theme).flatMap(Theme.init(rawValue:)) ?? .system
@@ -258,6 +263,11 @@ public final class ChatStore {
     func setFetchesPages(_ on: Bool) {
         fetchesPages = on
         defaults.set(on, forKey: Keys.fetchPages)
+    }
+
+    func setContinuesLongReplies(_ on: Bool) {
+        continuesLongReplies = on
+        defaults.set(on, forKey: Keys.continueLongReplies)
     }
 
     /// The models a saved connection serves, listed with that connection's own key.
@@ -637,7 +647,7 @@ public final class ChatStore {
     /// The app is about to leave the screen, or may only be pulling down Control Center. A continued processing task
     /// shows the person a system banner, so a reply asks for one only here and not each time one is sent.
     func appWillLeave() {
-        guard cover == nil, case .streaming(let id, _) = generation,
+        guard continuesLongReplies, cover == nil, case .streaming(let id, _) = generation,
               conversations.first(where: { $0.id == id })?.messages.last?.role == .assistant
         else { return }
         cover = background.cover { [weak self] in self?.systemEndedReply() }

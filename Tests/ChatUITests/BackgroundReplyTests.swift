@@ -74,8 +74,9 @@ struct BackgroundReplyTests {
         let server = StubServer { _ in (200, script.body) }
         server.holdsStreamsOpen = true
         let fake = FakeBackgroundTime(), clock = Clock()
-        return Setup(rig: Rig(server: server, background: fake.time, now: { clock.now }), server: server, fake: fake, clock: clock,
-                     script: script)
+        let rig = Rig(server: server, background: fake.time, now: { clock.now })
+        rig.store.setContinuesLongReplies(true)
+        return Setup(rig: rig, server: server, fake: fake, clock: clock, script: script)
     }
 
     private func until(_ condition: () -> Bool) async {
@@ -399,6 +400,31 @@ struct BackgroundReplyTests {
         #expect(s.fake.coversAsked == 0)
     }
 
+    @Test func noTaskIsAskedForUntilTheSettingIsTurnedOnAndTheChoiceIsKept() async {
+        let s = setUp()
+        defer { s.rig.cleanup() }
+        #expect(s.rig.reopened().continuesLongReplies)
+        s.store.setContinuesLongReplies(false)
+        #expect(s.rig.reopened().continuesLongReplies == false)
+        await startReply(s)
+
+        s.store.appWillLeave()
+        s.store.appMovedToBackground()
+        #expect(s.fake.coversAsked == 0)
+        #expect(s.fake.isHeld)
+
+        s.store.appBecameActive()
+        s.store.setContinuesLongReplies(true)
+        s.store.appWillLeave()
+        #expect(s.fake.coversAsked == 1)
+    }
+
+    @Test func aNewInstallDoesNotContinueLongReplies() {
+        let rig = Rig(server: StubServer { _ in (200, "") })
+        defer { rig.cleanup() }
+        #expect(rig.store.continuesLongReplies == false)
+    }
+
     @Test func aboutToLeaveAsksForOneTaskForTheReplyThatIsStreamingAndTellsItWhatHasArrived() async {
         let s = setUp()
         defer { s.rig.cleanup() }
@@ -453,6 +479,7 @@ struct BackgroundReplyTests {
         let rig = Rig(server: server, background: fake.time, now: { clock.now })
         defer { rig.cleanup() }
         rig.store.setFetchesPages(true)
+        rig.store.setContinuesLongReplies(true)
         rig.store.send("read \(host.body)")
         await streamed(rig.store, "A longer first round ")
         rig.store.appWillLeave()
