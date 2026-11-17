@@ -80,16 +80,19 @@ private final class ContinuedReply {
     static func submit(onCancel: @escaping @MainActor () -> Void) -> ReplyCover? {
         let identifier = "\(Bundle.main.bundleIdentifier ?? "com.local.lmchat").reply.\(UUID().uuidString)"
         let reply = ContinuedReply(identifier: identifier, onCancel: onCancel)
+        let log = Logger(subsystem: "com.local.lmchat", category: "background")
         // The handler runs on the main queue, and each identifier is registered once, as the system requires.
         guard BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: .main, launchHandler: { task in
             MainActor.assumeIsolated { reply.started(task) }
-        }) else { return nil }
+        }) else {
+            log.notice("The system would not register the continued task, so its identifier is not in BGTaskSchedulerPermittedIdentifiers")
+            return nil
+        }
         let request = BGContinuedProcessingTaskRequest(identifier: identifier, title: ReplyCover.title,
                                                        subtitle: ReplyCover.subtitle(characters: 0))
         do { try BGTaskScheduler.shared.submit(request) } catch {
             // The iOS simulator always lands here, and scripts/background_check.sh reads this line.
-            Logger(subsystem: "com.local.lmchat", category: "background")
-                .notice("The system refused the continued task: \(error.localizedDescription, privacy: .public)")
+            log.notice("The system refused the continued task: \(error.localizedDescription, privacy: .public)")
             return nil
         }
         return ReplyCover(update: { reply.update($0) }, finish: { reply.finish(success: $0) })

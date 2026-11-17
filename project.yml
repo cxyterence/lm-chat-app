@@ -24,7 +24,7 @@ targets:
       path: App/Info.plist
       properties:
         BGTaskSchedulerPermittedIdentifiers:
-          - com.local.lmchat.reply.*
+          - $(PRODUCT_BUNDLE_IDENTIFIER).reply.*
         CFBundleDisplayName: LM Chat
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
