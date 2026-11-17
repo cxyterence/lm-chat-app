@@ -1121,6 +1121,7 @@ public final class ChatStore {
             conversations[c].updatedAt = Date()
         }
         if liveReply?.messageID == messageID { liveReply = nil }
+        persist()
         releaseBackgroundTime()
         if case .failed = outcome { releaseCover(success: false) } else { releaseCover(success: true) }
         if case .failed(let message) = outcome {
@@ -1128,7 +1129,6 @@ public final class ChatStore {
         } else {
             generation = .idle
         }
-        persist()
     }
 
     /// Saves the reply so far, at most once per `partialSaveInterval`.

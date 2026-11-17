@@ -14,19 +14,28 @@ private final class FakeBackgroundTime {
     private(set) var coversAsked = 0
     private(set) var coverUpdates: [Int] = []
     private(set) var coverFinishes: [Bool] = []
+    /// Runs as the grant or the task is given back, so a test can look at what is saved at that moment.
+    var atRelease: (@MainActor () -> Void)?
 
     var time: BackgroundTime {
         BackgroundTime(
             begin: { [self] onExpiry in
                 begun += 1
                 expire = onExpiry
-                return { [self] in ended += 1 }
+                return { [self] in
+                    atRelease?()
+                    ended += 1
+                }
             },
             cover: { [self] onCancel in
                 coversAsked += 1
                 guard grantsCover else { return nil }
                 cancel = onCancel
-                return ReplyCover(update: { [self] in coverUpdates.append($0) }, finish: { [self] in coverFinishes.append($0) })
+                return ReplyCover(update: { [self] in coverUpdates.append($0) },
+                                  finish: { [self] in
+                                      atRelease?()
+                                      coverFinishes.append($0)
+                                  })
             })
     }
 
@@ -143,6 +152,21 @@ struct BackgroundReplyTests {
 
         #expect(s.fake.begun == 1 && s.fake.ended == 1)
         #expect(s.store.selectedConversation?.messages.last?.content == "Hello ")
+    }
+
+    @Test func theFinishedReplyIsSavedBeforeTheGrantAndTheTaskAreGivenBack() async throws {
+        let s = setUp()
+        defer { s.rig.cleanup() }
+        await startReply(s)
+        s.store.appWillLeave()
+        s.store.appMovedToBackground()
+        var seen: [Bool?] = []
+        s.fake.atRelease = { seen.append((try? self.savedReply(s))?.interrupted) }
+
+        s.server.endStreams()
+        await untilIdle(s.store)
+
+        #expect(seen == [false, false], "the file already held the finished reply when the grant and the task went back")
     }
 
     @Test func theGrantEndsWhenTheAppBecomesActive() async {
