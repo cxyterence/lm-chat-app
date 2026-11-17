@@ -99,12 +99,17 @@ struct BackgroundReplyTests {
     }
 
     @Test func aReplyIsOnDiskWhileItIsStillStreaming() async throws {
-        let s = setUp()
+        let s = setUp(first: "")
         defer { s.rig.cleanup() }
-        await startReply(s)
+        s.store.send("hi")
+        await until { s.store.selectedConversation?.title == "Stub Title" && s.server.chats.count == 1 }
+        try await Task.sleep(for: .milliseconds(50))
+
+        s.server.deliver(["Hello "])
+        await streamed(s.store, "Hello ")
 
         #expect(s.store.isBusy)
-        let saved = try #require(try savedReply(s))
+        let saved = try #require(try savedReply(s), "the title's save came first, so this one is the reply's own")
         #expect(saved.content == "Hello ")
         #expect(saved.interrupted)
     }
