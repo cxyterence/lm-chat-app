@@ -202,6 +202,41 @@ struct BackgroundReplyTests {
         #expect(try s.rig.saved().first?.messages.map(\.role) == [.user])
     }
 
+    @Test func aCompactionCutShortLeavesTheSavedChatAsItWasBeforeIt() async throws {
+        let s = setUp()
+        defer { s.rig.cleanup() }
+        s.store.send("hi")
+        await streamed(s.store, "Hello ")
+        s.server.endStreams()
+        await untilIdle(s.store)
+        await until { s.store.selectedConversation?.title == "Stub Title" }
+        let before = s.server.chats.count
+
+        s.store.run(.compact, argument: "")
+        await until { s.server.chats.count > before }
+        await streamed(s.store, "Hello ")
+        s.store.appMovedToBackground()
+        #expect(try s.rig.saved().first?.messages.map(\.role) == [.user, .assistant], "the save on leaving")
+
+        s.clock.advance(2.5)
+        s.server.deliver(["more "])
+        await streamed(s.store, "Hello more ")
+        #expect(try s.rig.saved().first?.messages.map(\.role) == [.user, .assistant], "the save as it streams")
+
+        s.fake.expireNow()
+        #expect(try s.rig.saved().first?.messages.map(\.role) == [.user, .assistant], "the save when the grant runs out")
+
+        let launched = s.rig.reopened()
+        #expect(launched.selectedConversation?.messages.map(\.role) == [.user, .assistant])
+        #expect(launched.unavailableReason(.compact) == nil)
+        s.server.holdsStreamsOpen = false
+        s.script.body = sse(["ok"])
+        launched.send("next")
+        await untilIdle(launched)
+        let sent = try #require(s.server.chats.last { transcript($0).last?.text == "next" })
+        #expect(transcript(sent).map(\.role) == ["user", "assistant", "user"], "no empty summary goes on the wire")
+    }
+
     @Test func aChatFoundMidStreamAtLaunchShowsWhatArrivedAsInterruptedAndFinishingClearsTheMark() async throws {
         let s = setUp()
         defer { s.rig.cleanup() }

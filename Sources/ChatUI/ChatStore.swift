@@ -1134,8 +1134,8 @@ public final class ChatStore {
         guard let live = liveReply else { return saved }
         for c in saved.indices {
             guard let m = saved[c].messages.firstIndex(where: { $0.id == live.messageID }) else { continue }
-            guard saved[c].messages[m].role == .assistant else { break }
-            if live.content.isEmpty && live.reasoning.isEmpty && live.toolCalls.isEmpty {
+            // A summary is all or nothing, so one still being written is left out and the saved chat is the chat as it was.
+            if saved[c].messages[m].role != .assistant || (live.content.isEmpty && live.reasoning.isEmpty && live.toolCalls.isEmpty) {
                 saved[c].messages.remove(at: m)
             } else {
                 saved[c].messages[m].content = live.content
