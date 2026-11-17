@@ -41,7 +41,7 @@ extension ChatClient {
 
     private func titleAttempt(model: String, prompt: String, effort: ReasoningEffort?) async throws -> String? {
         var text = ""
-        for try await event in stream(model: model, messages: ChatTitle.messages(for: prompt), reasoningEffort: effort) {
+        for try await event in stream(model: model, messages: ChatTitle.messages(for: prompt), reasoningEffort: effort, includeUsage: false, purpose: .title) {
             guard case .content(let chunk) = event else { continue }
             text += chunk
             if text.count > 400 { break }

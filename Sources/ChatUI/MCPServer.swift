@@ -34,8 +34,9 @@ struct OfferedTool {
     var spec: ToolSpec { ToolSpec(name: name, description: tool.description, parameters: tool.inputSchema) }
 
     /// OpenAI allows letters, digits, `_` and `-`, up to 64 characters. Clashes take the server's name as a prefix.
+    /// The app's own tools' names are always taken, so no server's tool can answer to them.
     static func offer(_ servers: [(MCPServer, MCPClient, [MCPTool])]) -> [OfferedTool] {
-        var taken = Set<String>()
+        var taken: Set = [ImageRequest.toolName, FetchRequest.toolName]
         var offered: [OfferedTool] = []
         for (server, client, tools) in servers {
             for tool in tools {
@@ -51,5 +52,48 @@ struct OfferedTool {
     private static func wireName(_ raw: String) -> String {
         String(String(raw.unicodeScalars.map { CharacterSet.alphanumerics.contains($0) && $0.isASCII || $0 == "-" ? Character($0) : "_" })
             .prefix(64))
+    }
+}
+
+/// A tool offered with one reply, by what runs it.
+enum ReplyTool {
+    case mcp(OfferedTool)
+    /// `generate_image`, which the app runs itself against the image model's own connection.
+    case image(connection: String, config: ServerConfig, model: String)
+    /// `fetch_url`, which the app runs itself from this device.
+    case fetch
+
+    var name: String {
+        switch self {
+        case .mcp(let tool): tool.name
+        case .image: ImageRequest.toolName
+        case .fetch: FetchRequest.toolName
+        }
+    }
+
+    var spec: ToolSpec {
+        switch self {
+        case .mcp(let tool): tool.spec
+        case .image: ImageRequest.toolSpec
+        case .fetch: FetchRequest.toolSpec
+        }
+    }
+
+    /// Shown beside `call`: the MCP server's name, the image connection's, or the address of the page.
+    func serverName(for call: ToolCall) -> String {
+        switch self {
+        case .mcp(let tool): tool.server.name
+        case .image(let connection, _, _): connection
+        case .fetch: FetchRequest.address(in: call.arguments)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        }
+    }
+}
+
+extension ToolCall {
+    /// What to ask before running this call, and the address it would read when it is a fetch. The address is
+    /// shown whole, since a page can hide what it wants sent away at the end of one.
+    var approval: (question: String, address: String?) {
+        guard name == FetchRequest.toolName else { return ("This tool can make changes. Run it?", nil) }
+        return ("The model wants to read a page you didn't mention. Read it?", FetchRequest.address(in: arguments) ?? server)
     }
 }

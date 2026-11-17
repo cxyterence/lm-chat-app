@@ -12,11 +12,17 @@ On mock-reasoning, "/huge" streams ~20k characters of reasoning then ~6k of Mark
 "/spans" streams inline formatting slowly, three characters at a time, to show half-finished spans.
 Image parts are acknowledged with their sizes, except by mock-think, which rejects them like a text-only model.
 mock-image is listed the way SGLang lists a diffusion model and answers /v1/images/generations with a PNG.
+It also answers multipart /v1/images/edits when the request has a prompt and an `image` or `image[]` file.
+Both take `size` ("WxH") and answer with a PNG that big. Like SGLang, an edit without a size is refused.
 "draw fail" is refused. Set MOCK_IMAGE_LINKS=1 to answer with a link to fetch, as SGLang can, in place of base64.
+A request with stream_options.include_usage gets a final chunk of token counts, with reasoning tokens split out.
+Set MOCK_NO_STREAM_OPTIONS=1 to refuse stream_options with a 400, as some servers do.
 Set MOCK_API_KEY to require `Authorization: Bearer <key>`. Set MOCK_EXTRA_MODELS=96 to list a long model list like OpenAI's.
 """
 import argparse
 import base64
+from email.parser import BytesParser
+from email.policy import HTTP
 from itertools import takewhile
 import re
 import json
@@ -66,6 +72,21 @@ MCP_TOOLS = [
 def chunk(delta, finish=None):
     return {"object": "chat.completion.chunk",
             "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+
+
+def usage_for(body, events):
+    """What a server reports in the last chunk when asked: a word counts as a token."""
+    if not (body.get("stream_options") or {}).get("include_usage"):
+        return None
+    prompt = sum(len(str(m.get("content") or "").split()) for m in body.get("messages", []))
+    deltas = [e["choices"][0]["delta"] for e in events]
+    reasoning = sum(1 for d in deltas if d.get("reasoning_content") or d.get("reasoning"))
+    answer = sum(1 for d in deltas if d.get("content") or d.get("tool_calls"))
+    usage = {"prompt_tokens": prompt, "completion_tokens": reasoning + answer,
+             "total_tokens": prompt + reasoning + answer}
+    if reasoning:
+        usage["completion_tokens_details"] = {"reasoning_tokens": reasoning}
+    return usage
 
 
 def script(model, reply):
@@ -146,7 +167,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorized():
             return
         if self.path.rstrip("/") == "/v1/models":
-            image = {"id": IMAGE_MODEL, "object": "model", "task_type": "t2i", "supported_task_types": ["t2i"]}
+            image = {"id": IMAGE_MODEL, "object": "model", "task_type": "t2i", "supported_task_types": ["t2i", "ti2i"]}
             self.send_json(200, {"object": "list",
                                  "data": [{"id": m, "object": "model"} for m in MODELS] + [image]})
         elif re.fullmatch(r"/v1/images/[^/]+/content", self.path):
@@ -218,15 +239,40 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def image(self, body):
+    def image(self, body, edit=False):
         if not body.get("prompt"):
             return self.send_json(400, {"error": {"message": "prompt is required"}})
         if "fail" in body["prompt"]:
             return self.send_json(400, {"error": {"message": "Your request was rejected by the safety system."}})
+        size = body.get("size")
+        match = re.fullmatch(r"(\d+)x(\d+)", size) if size is not None else None
+        if size is not None and not (match and 0 < int(match[1]) <= 4096 and 0 < int(match[2]) <= 4096):
+            return self.send_json(400, {"detail": f"invalid size {size!r}"})
+        if edit and size is None:
+            return self.send_json(400, {"detail": "target.width must be an integer"})
         time.sleep(float(os.environ.get("MOCK_IMAGE_SECONDS", "2")))
         if os.environ.get("MOCK_IMAGE_LINKS"):
             return self.send_json(200, {"created": int(time.time()), "data": [{"url": "/v1/images/mock/content"}]})
-        self.send_json(200, {"created": int(time.time()), "data": [{"b64_json": base64.b64encode(png()).decode()}]})
+        picture = png(int(match[1]), int(match[2])) if match else png()
+        self.send_json(200, {"created": int(time.time()), "data": [{"b64_json": base64.b64encode(picture).decode()}]})
+
+    def edit(self):
+        raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        message = BytesParser(policy=HTTP).parsebytes(
+            b"Content-Type: " + self.headers.get("Content-Type", "").encode() + b"\r\n\r\n" + raw)
+        fields, files = {}, []
+        for part in message.iter_parts() if message.is_multipart() else []:
+            name = part.get_param("name", header="content-disposition")
+            if part.get_filename() is not None:
+                if name in ("image", "image[]"):
+                    files.append(part.get_payload(decode=True))
+            elif name:
+                fields[name] = part.get_content()
+        if not fields.get("prompt"):
+            return self.send_json(400, {"error": {"message": "prompt is required"}})
+        if not files:
+            return self.send_json(400, {"error": {"message": "at least one image is required"}})
+        self.image(fields, edit=True)
 
     def do_POST(self):
         if self.path.rstrip("/") == "/search":
@@ -235,6 +281,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.mcp()
         if not self.authorized():
             return
+        if self.path.rstrip("/") == "/v1/images/edits":
+            return self.edit()
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
         if self.path.rstrip("/") == "/v1/images/generations":
             return self.image(body)
@@ -245,6 +293,8 @@ class Handler(BaseHTTPRequestHandler):
         model = body.get("model", "mock-chat")
         if model not in MODELS:
             return self.send_json(404, {"error": {"message": f"model '{model}' not found"}})
+        if "stream_options" in body and os.environ.get("MOCK_NO_STREAM_OPTIONS"):
+            return self.send_json(400, {"error": {"message": "Unrecognized request argument supplied: stream_options"}})
         effort = body.get("reasoning_effort")
         if effort is not None and model in EFFORTS and effort not in EFFORTS[model]:
             return self.send_json(400, {"error": {"message": f"Unexpected reasoning effort {effort}."}})
@@ -268,7 +318,7 @@ class Handler(BaseHTTPRequestHandler):
             events = [chunk({"tool_calls": [call]})] + \
                      [chunk({"tool_calls": [{"index": 0, "function": {"arguments": p}}]}) for p in pieces] + \
                      [chunk({}, finish="tool_calls")]
-            return self.stream(events, [0.05] * len(events), finish=None)
+            return self.stream(events, [0.05] * len(events), finish=None, usage=usage_for(body, events))
         if last_user.startswith("Answer using these web search results"):
             sources = re.findall(r"^\[(\d+)\] .*\n(\S+)$", last_user, re.M)
             question = last_user.rsplit("Question: ", 1)[-1]
@@ -307,9 +357,9 @@ class Handler(BaseHTTPRequestHandler):
                 {"index": 0, "message": {"role": "assistant", "content": content},
                  "finish_reason": "stop"}]})
 
-        self.stream(events, delays)
+        self.stream(events, delays, usage=usage_for(body, events))
 
-    def stream(self, events, delays, finish="stop"):
+    def stream(self, events, delays, finish="stop", usage=None):
         if finish:
             events, delays = events + [chunk({}, finish)], delays + [0]
         self.send_response(200)
@@ -321,6 +371,8 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(f"data: {json.dumps(e)}\n\n".encode())
             self.wfile.flush()
             time.sleep(delay)
+        if usage:
+            self.wfile.write(f"data: {json.dumps({'object': 'chat.completion.chunk', 'choices': [], 'usage': usage})}\n\n".encode())
         self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
 

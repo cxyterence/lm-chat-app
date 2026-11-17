@@ -37,6 +37,20 @@ struct SSEDecoderTests {
         #expect(try decoder.decode(line: #"data: {"choices":[],"usage":{}}"#).isEmpty)
     }
 
+    @Test func usageChunkCarriesTheCounts() throws {
+        let line = #"data: {"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18,"completion_tokens_details":{"reasoning_tokens":3}}}"#
+        #expect(try decoder.decode(line: line) == [.usage(Usage(promptTokens: 11, completionTokens: 7, reasoningTokens: 3))])
+    }
+
+    @Test func nullUsageOnEveryOtherChunkSaysNothing() throws {
+        #expect(try decoder.decode(line: #"data: {"choices":[{"delta":{"content":"hi"}}],"usage":null}"#) == [.content("hi")])
+    }
+
+    @Test func aUsageBlockInAnUnexpectedShapeDoesNotBreakTheReply() throws {
+        let line = #"data: {"choices":[{"delta":{"content":"hi"}}],"usage":{"prompt_tokens":"many"}}"#
+        #expect(try decoder.decode(line: line) == [.content("hi")])
+    }
+
     @Test(arguments: [
         #"data: {"error":{"message":"boom","type":"x"}}"#,
         #"data: {"error":"boom"}"#,

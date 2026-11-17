@@ -2,13 +2,15 @@ import ChatCore
 import SwiftUI
 
 enum SettingsPage: String, CaseIterable, Identifiable {
-    case connections, apiKeys, mcp, appearance
+    case connections, apiKeys, mcp, imageTool, webPages, appearance
 
     var id: Self { self }
     var title: String {
         switch self {
         case .apiKeys: "API Keys"
         case .mcp: "MCP Connections"
+        case .imageTool: "Image Generation"
+        case .webPages: "Web Pages"
         default: rawValue.capitalized
         }
     }
@@ -17,6 +19,8 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         case .connections: "network"
         case .apiKeys: "key"
         case .mcp: "point.3.connected.trianglepath.dotted"
+        case .imageTool: "photo"
+        case .webPages: "link"
         case .appearance: "paintpalette"
         }
     }
@@ -33,6 +37,10 @@ enum MCPRoute: Hashable {
 enum ConnectionRoute: Hashable {
     case new
     case edit(UUID)
+    /// The Check Model page of a saved connection.
+    case check(UUID)
+    /// The Compare Texts page of a saved connection.
+    case compare(UUID)
 }
 
 struct SettingsView: View {
@@ -71,6 +79,8 @@ struct SettingsView: View {
                     case .connections: ConnectionsSettings(store: store) { path.append($0) }
                     case .apiKeys: APIKeysSettings(store: store)
                     case .mcp: MCPSettings(store: store) { path.append($0) }
+                    case .imageTool: ImageToolSettings(store: store)
+                    case .webPages: WebPagesSettings(store: store)
                     case .appearance: AppearanceSettings(store: store)
                     }
                 }
@@ -82,8 +92,14 @@ struct SettingsView: View {
                     .background(palette.groupedBackground)
             }
             .navigationDestination(for: ConnectionRoute.self) { route in
-                ConnectionEditor(store: store, route: route)
-                    .background(palette.groupedBackground)
+                Group {
+                    switch route {
+                    case .check(let id): CapabilityReportView(store: store, connectionID: id)
+                    case .compare(let id): TextComparisonView(store: store, connectionID: id)
+                    case .new, .edit: ConnectionEditor(store: store, route: route)
+                    }
+                }
+                .background(palette.groupedBackground)
             }
         }
         #if os(macOS)
@@ -98,6 +114,8 @@ struct SettingsView: View {
             store.mcpServers.filter(\.enabled).map(\.name).joined(separator: ", ")
         case .apiKeys:
             APIService.allCases.filter { !store.serviceKey($0).isEmpty }.map(\.name).joined(separator: ", ")
+        case .imageTool: store.imageTool?.model ?? ""
+        case .webPages: store.fetchesPages ? "On" : "Off"
         case .appearance: store.theme.name
         }
     }
@@ -202,6 +220,7 @@ struct ConnectionEditor: View {
     @State private var baseURL = ""
     @State private var apiKey = ""
     @State private var systemPrompt = ""
+    @State private var api = WireAPI.chatCompletions
     @State private var error: String?
     @State private var confirmingDelete = false
     @Environment(\.dismiss) private var dismiss
@@ -227,6 +246,10 @@ struct ConnectionEditor: View {
                     .keyboardType(.URL)
                     #endif
                 SecureField("API key (optional)", text: $apiKey)
+                Picker("API", selection: $api) {
+                    Text("Chat Completions").tag(WireAPI.chatCompletions)
+                    Text("Responses").tag(WireAPI.responses)
+                }
                 if let error {
                     Text(error).foregroundStyle(palette.danger).font(.callout)
                 }
@@ -248,7 +271,26 @@ struct ConnectionEditor: View {
             }
             .listRowBackground(palette.surface)
 
-            if existing != nil {
+            if let existing {
+                Section {
+                    NavigationLink(value: ConnectionRoute.check(existing.id)) {
+                        LabeledContent("Check Model") {
+                            Text(existing.model.isEmpty ? "No model" : existing.model)
+                                .foregroundStyle(palette.secondaryText).lineLimit(1).truncationMode(.middle)
+                        }
+                    }
+                } footer: {
+                    Text("Finds out whether the model takes tools and pictures, and which reasoning levels it accepts.")
+                }
+                .listRowBackground(palette.surface)
+
+                Section {
+                    NavigationLink("Compare Texts", value: ConnectionRoute.compare(existing.id))
+                } footer: {
+                    Text("Tries the server's embeddings and rerank endpoints on a few texts.")
+                }
+                .listRowBackground(palette.surface)
+
                 Section {
                     Button("Delete Connection", role: .destructive) { confirmingDelete = true }
                 }
@@ -279,6 +321,7 @@ struct ConnectionEditor: View {
             baseURL = existing.baseURL.absoluteString
             apiKey = store.apiKey(for: existing.id)
             systemPrompt = existing.systemPrompt
+            api = existing.api
         }
     }
 
@@ -299,6 +342,7 @@ struct ConnectionEditor: View {
         connection.name = trimmedName.isEmpty ? Connection.address(of: parsed.baseURL) : trimmedName
         connection.baseURL = parsed.baseURL
         connection.systemPrompt = systemPrompt
+        connection.api = api
         store.saveConnection(connection, apiKey: parsed.apiKey ?? "")
         dismiss()
     }
@@ -350,6 +394,100 @@ private struct ServiceKeyRow: View {
         }
         .listRowBackground(palette.surface)
         .onAppear { key = store.serviceKey(service) }
+    }
+}
+
+/// Picks the image model that chat models draw with, from the image models a saved connection serves.
+struct ImageToolSettings: View {
+    private enum Listing {
+        case loading
+        case models([String])
+        case failed(String)
+    }
+
+    let store: ChatStore
+    @State private var connection: UUID?
+    @State private var listing = Listing.loading
+    @Environment(\.palette) private var palette
+
+    init(store: ChatStore) {
+        self.store = store
+        _connection = State(initialValue: store.imageTool?.connectionID)
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                Picker("Connection", selection: $connection) {
+                    Text("None").tag(UUID?.none)
+                    ForEach(store.connections) { Text($0.name).tag(UUID?.some($0.id)) }
+                }
+                if let connection { models(of: connection) }
+            } footer: {
+                Text("A chat model that supports tool calling can draw with this image model when you ask for a picture, and edit the photos you attach. The image model needs no chat of its own.")
+            }
+            .listRowBackground(palette.surface)
+        }
+        .formStyle(.grouped)
+        .foregroundStyle(palette.text)
+        .scrollContentBackground(.hidden)
+        .task(id: connection) { await load() }
+    }
+
+    @ViewBuilder private func models(of connection: UUID) -> some View {
+        switch listing {
+        case .loading:
+            HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Loading models…") }
+                .font(.callout).foregroundStyle(palette.secondaryText)
+        case .failed(let message):
+            Text(message).font(.callout).foregroundStyle(palette.danger)
+        case .models(let names) where names.isEmpty:
+            Text("This server lists no image models.").font(.callout).foregroundStyle(palette.secondaryText)
+        case .models(let names):
+            Picker("Model", selection: Binding(
+                get: { store.imageTool?.model ?? "" },
+                set: { store.setImageTool(ImageTool(connectionID: connection, model: $0)) }
+            )) {
+                ForEach(names, id: \.self) { Text($0).tag($0) }
+            }
+        }
+    }
+
+    /// Lists the picked connection's image models. A connection newly picked starts with the first of them.
+    private func load() async {
+        guard let id = connection else { return store.setImageTool(nil) }
+        listing = .loading
+        var names: [String] = []
+        do {
+            names = try await store.imageModels(of: id)
+            listing = .models(names)
+        } catch {
+            listing = .failed(error.localizedDescription)
+        }
+        guard !Task.isCancelled else { return }
+        if store.imageTool?.connectionID != id {
+            store.setImageTool(names.first.map { ImageTool(connectionID: id, model: $0) })
+        }
+    }
+}
+
+/// Lets chat models read the pages of links, through `fetch_url`.
+struct WebPagesSettings: View {
+    let store: ChatStore
+    @Environment(\.palette) private var palette
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Fetch web pages", isOn: Binding(get: { store.fetchesPages }, set: store.setFetchesPages))
+            } footer: {
+                Text("A chat model that supports tool calling can read a link you paste. Pages are fetched from this device, and the model sees their text. It asks before reading an address you didn't give it.")
+            }
+            .listRowBackground(palette.surface)
+        }
+        .formStyle(.grouped)
+        .foregroundStyle(palette.text)
+        .scrollContentBackground(.hidden)
     }
 }
 

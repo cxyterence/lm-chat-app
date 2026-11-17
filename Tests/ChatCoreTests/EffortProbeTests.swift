@@ -24,6 +24,26 @@ struct EffortProbeTests {
         #expect(try await server.client.reasoningEfforts(model: "m") == [.low, .medium, .high])
     }
 
+    @Test func aRefusalThatOnlyMentionsEffortInPassingDoesNotRejectALevel() async throws {
+        let server = StubServer { body in
+            ["low", "medium"].contains(body["reasoning_effort"] as? String ?? "")
+                ? (400, #"{"error":{"message":"The request could not be finished. We made every effort to fit it in the context window."}}"#)
+                : (400, #"{"error":{"message":"Unsupported value: 'reasoning_effort' does not support this value.","param":"reasoning_effort"}}"#)
+        }
+        #expect(try await server.client.reasoningEfforts(model: "m") == [.low, .medium])
+    }
+
+    @Test(arguments: [
+        #"{"error":{"message":"1 validation error: body.reasoning.effort Input should be 'none'"}}"#,
+        #"{"error":{"message":"Unexpected reasoning effort"}}"#,
+        #"{"error":{"message":"Unrecognized request argument supplied: reasoning_effort"}}"#,
+    ]) func aRefusalNamingTheFieldInAnyOfItsSpellingsRejectsTheLevelOnBothAPIs(message: String) async throws {
+        for api in [WireAPI.chatCompletions, .responses] {
+            let server = StubServer { _ in (400, message) }
+            #expect(try await server.makeClient(apiKey: "", api: api).reasoningEfforts(model: "m") == [])
+        }
+    }
+
     @Test func aModelWithoutTheFieldHasNoLevels() async throws {
         let server = StubServer { _ in (400, #"{"error":{"message":"Unrecognized request argument supplied: reasoning_effort"}}"#) }
         #expect(try await server.client.reasoningEfforts(model: "m") == [])

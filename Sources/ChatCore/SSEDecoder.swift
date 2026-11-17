@@ -4,6 +4,10 @@ public enum StreamEvent: Equatable, Sendable {
     case content(String)
     case reasoning(String)
     case toolCall(ToolCallDelta)
+    /// Token counts, from the final chunk of a stream that asked for them.
+    case usage(Usage)
+    /// Something the client changed about the request, such as retrying without `stream_options`.
+    case adapted(Adaptation)
     case done(finishReason: String?)
 }
 
@@ -11,6 +15,8 @@ public enum ChatClientError: Error, Equatable, LocalizedError {
     case http(status: Int, message: String)
     case invalidResponse
     case server(String)
+    /// A reply that parsed but doesn't add up, worded for the user as is.
+    case unexpected(String)
 
     public var errorDescription: String? {
         switch self {
@@ -20,6 +26,8 @@ public enum ChatClientError: Error, Equatable, LocalizedError {
             "The server sent a response that couldn't be understood."
         case .server(let message):
             "Server error: \(message)"
+        case .unexpected(let message):
+            message
         }
     }
 }
@@ -58,6 +66,11 @@ struct SSEDecoder {
             if let reason = choice.finishReason {
                 events.append(.done(finishReason: reason))
             }
+        }
+        if let wire = chunk.usage {
+            let usage = Usage(promptTokens: wire.promptTokens, completionTokens: wire.completionTokens,
+                              reasoningTokens: wire.completionTokensDetails?.reasoningTokens)
+            if usage != Usage() { events.append(.usage(usage)) }
         }
         return events
     }

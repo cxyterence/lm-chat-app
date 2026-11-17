@@ -146,7 +146,7 @@ struct ToolLoopTests {
         #expect(store.selectedConversation?.messages.last?.content == "plain answer")
         store.send("again")
         await untilIdle(store)
-        #expect(stub.chats.map { offeredTools($0).isEmpty } == [false, true, true], "remembers not to send tools")
+        #expect(stub.asked.map { offeredTools($0).isEmpty } == [false, true, true], "remembers not to send tools")
     }
 
     @Test func anUnreachableServerIsLeftOut() async throws {

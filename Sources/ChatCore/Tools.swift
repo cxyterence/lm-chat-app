@@ -40,6 +40,13 @@ public enum JSONValue: Codable, Equatable, Sendable {
         if case .string(let v) = self { return v }
         return nil
     }
+
+    /// The elements of an array of strings, nil for anything else.
+    var strings: [String]? {
+        guard case .array(let items) = self else { return nil }
+        let strings = items.compactMap(\.string)
+        return strings.count == items.count ? strings : nil
+    }
 }
 
 /// A function the model may call, in the shape OpenAI's `tools` field takes.
@@ -73,7 +80,7 @@ public struct ToolCall: Codable, Equatable, Sendable, Identifiable {
     public var name: String
     /// JSON text exactly as the model wrote it.
     public var arguments: String
-    /// The MCP server that offers the tool, for display.
+    /// The MCP server that offers the tool, or the image connection for `generate_image`, for display.
     public var server: String
     public var result: Result?
 

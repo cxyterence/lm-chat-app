@@ -1,5 +1,8 @@
 @testable import ChatCore
+import CoreGraphics
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 
 // Kept separate from the Testing-importing files: the CLT toolchain lacks the
 // _Testing_Foundation overlay, which a file importing both would require.
@@ -23,31 +26,62 @@ func write(_ text: String, to url: URL) throws {
 
 /// A fake OpenAI-compatible server reached through URLProtocol. Each instance owns a unique host,
 /// so tests using different servers can run in parallel.
+/// A reply with status 0 fails the connection, and `holdsOpen` leaves a response unfinished, like a stream
+/// that is still going.
 final class StubServer: @unchecked Sendable {
     typealias Reply = (status: Int, body: String)
 
     let host = "stub-\(UUID().uuidString.lowercased()).test"
-    private let respond: @Sendable ([String: Any]) -> Reply
+    let holdsOpen: Bool
+    private let respond: @Sendable (_ path: String, _ body: [String: Any]) -> Reply
     private let lock = NSLock()
     private var received: [[String: Any]] = []
 
-    init(respond: @escaping @Sendable ([String: Any]) -> Reply) {
-        self.respond = respond
+    init(holdsOpen: Bool = false, respond: @escaping @Sendable ([String: Any]) -> Reply) {
+        self.holdsOpen = holdsOpen
+        self.respond = { _, body in respond(body) }
+        StubProtocol.register(self)
+    }
+
+    init(route: @escaping @Sendable (_ path: String, _ body: [String: Any]) -> Reply) {
+        holdsOpen = false
+        respond = route
         StubProtocol.register(self)
     }
 
     var bodies: [[String: Any]] { lock.withLock { received } }
+    private var raw: [(path: String, method: String?, contentType: String?, body: Data)] = []
+    /// Every request as sent, oldest first.
+    var requests: [(path: String, method: String?, contentType: String?, body: Data)] { lock.withLock { raw } }
 
-    var client: ChatClient {
+    var client: ChatClient { makeClient(apiKey: "") }
+
+    func makeClient(apiKey: String, api: WireAPI = .chatCompletions, record: (@Sendable (Exchange) -> Void)? = nil) -> ChatClient {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StubProtocol.self]
-        return ChatClient(config: try! ServerConfig.parse(baseURL: "http://\(host)/v1", apiKey: ""),
-                          session: URLSession(configuration: configuration))
+        var config = try! ServerConfig.parse(baseURL: "http://\(host)/v1", apiKey: apiKey)
+        config.api = api
+        return ChatClient(config: config, session: URLSession(configuration: configuration), record: record)
     }
 
-    fileprivate func handle(_ body: [String: Any]) -> Reply {
-        lock.withLock { received.append(body) }
-        return respond(body)
+    fileprivate func handle(_ body: [String: Any], raw request: (path: String, method: String?, contentType: String?, body: Data)) -> Reply {
+        lock.withLock { received.append(body); raw.append(request) }
+        return respond(request.path, body)
+    }
+}
+
+/// Collects the exchanges a client reports.
+final class Recorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [Exchange] = []
+
+    var exchanges: [Exchange] { lock.withLock { items } }
+    var sink: @Sendable (Exchange) -> Void { { [self] exchange in lock.withLock { items.append(exchange) } } }
+
+    /// Waits for `count` exchanges, since a stream reports from its own task after the caller has moved on.
+    func wait(for count: Int) async -> [Exchange] {
+        for _ in 0..<300 where exchanges.count < count { try? await Task.sleep(for: .milliseconds(10)) }
+        return exchanges
     }
 }
 
@@ -69,12 +103,18 @@ final class StubProtocol: URLProtocol {
 
     override func startLoading() {
         let server = Self.lock.withLock { Self.servers[request.url?.host ?? ""] }!
-        let reply = server.handle(jsonObject(Self.body(of: request)) ?? [:])
-        let response = HTTPURLResponse(url: request.url!, statusCode: reply.status, httpVersion: "HTTP/1.1",
+        let body = Self.body(of: request) ?? Data()
+        let reply = server.handle(jsonObject(body) ?? [:],
+                                  raw: (request.url?.path ?? "", request.httpMethod, request.value(forHTTPHeaderField: "Content-Type"), body))
+        let response = HTTPURLResponse(url: request.url!, statusCode: max(reply.status, 200), httpVersion: "HTTP/1.1",
                                        headerFields: ["Content-Type": "text/event-stream"])!
+        if reply.status == 0 {
+            client?.urlProtocol(self, didFailWithError: URLError(.cannotConnectToHost))
+            return
+        }
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: Data(reply.body.utf8))
-        client?.urlProtocolDidFinishLoading(self)
+        if !server.holdsOpen { client?.urlProtocolDidFinishLoading(self) }
     }
 
     override func stopLoading() {}
@@ -104,3 +144,13 @@ func makeImageStore() -> (store: ImageStore, cleanup: @Sendable () -> Void) {
 func fileSize(_ url: URL) -> Int { (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0 }
 
 func isJSONNull(_ value: Any?) -> Bool { value is NSNull }
+
+func makePNG(width: Int, height: Int) -> Data {
+    let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    let output = NSMutableData()
+    let destination = CGImageDestinationCreateWithData(output, UTType.png.identifier as CFString, 1, nil)!
+    CGImageDestinationAddImage(destination, context.makeImage()!, nil)
+    CGImageDestinationFinalize(destination)
+    return output as Data
+}

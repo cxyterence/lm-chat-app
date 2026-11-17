@@ -17,6 +17,15 @@ public enum ImageAttachment {
         return CGImageDestinationFinalize(destination) ? output as Data : nil
     }
 
+    /// The pixel size of the first image, read from its header without decoding it.
+    public static func dimensions(of data: Data) -> (width: Int, height: Int)? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = props[kCGImagePropertyPixelWidth] as? Int, let height = props[kCGImagePropertyPixelHeight] as? Int
+        else { return nil }
+        return (width, height)
+    }
+
     public static func downsample(_ data: Data, maxPixels: Int) -> CGImage? {
         CGImageSourceCreateWithData(data as CFData, nil).flatMap { thumbnail($0, maxPixels: maxPixels) }
     }

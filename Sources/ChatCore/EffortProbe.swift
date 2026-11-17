@@ -18,21 +18,48 @@ extension ChatClient {
     }
 
     private func accepts(model: String, effort: String) async throws -> Bool {
-        var request = URLRequest(url: config.baseURL.appendingPathComponent("chat/completions"))
+        let reply = try await probe(WireProbeRequest(model: model, reasoningEffort: effort))
+        switch reply.status {
+        case 200..<300: return true
+        case 400, 422:
+            // vLLM's Responses endpoint names the field `body.reasoning.effort`.
+            let text = reply.text.lowercased()
+            return !["reasoning_effort", "reasoning effort", "reasoning.effort"].contains(where: text.contains)
+        default: throw reply.error
+        }
+    }
+
+    /// Sends a one-token request. Any status comes back as a reply, for the caller to read.
+    func probe(_ body: WireProbeRequest) async throws -> ProbeReply {
+        var request = URLRequest(url: config.baseURL.appendingPathComponent(config.api == .responses ? "responses" : "chat/completions"))
         request.httpMethod = "POST"
         request.timeoutInterval = 30
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         authorize(&request)
-        request.httpBody = try JSONEncoder().encode(WireProbeRequest(model: model, reasoningEffort: effort))
-
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw ChatClientError.invalidResponse }
-        switch http.statusCode {
-        case 200..<300: return true
-        case 400, 422:
-            let body = String(decoding: data, as: UTF8.self).lowercased()
-            return !(body.contains("reasoning_effort") || body.contains("reasoning effort"))
-        default: throw Self.httpError(status: http.statusCode, body: data)
+        switch config.api {
+        case .chatCompletions:
+            request.httpBody = try JSONEncoder().encode(body)
+        case .responses:
+            var probe = WireResponsesRequest(model: body.model, messages: body.messages, stream: false, effort: body.reasoningEffort,
+                                             tools: (body.tools ?? []).map(WireResponsesTool.init))
+            probe.maxOutputTokens = 16
+            request.httpBody = try JSONEncoder().encode(probe)
         }
+
+        let (data, http) = try await perform(request, purpose: .probe)
+        return ProbeReply(status: http.statusCode, data: data)
+    }
+}
+
+struct ProbeReply {
+    let status: Int
+    let data: Data
+
+    var text: String { String(decoding: data, as: UTF8.self) }
+    var error: ChatClientError { ChatClient.httpError(status: status, body: data) }
+
+    /// The server's own words, without the status.
+    var message: String {
+        if case .http(_, let message) = error { message } else { text }
     }
 }

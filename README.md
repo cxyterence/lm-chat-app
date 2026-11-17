@@ -9,7 +9,7 @@ A connection is a URL and an optional API key, plus the model and system prompt 
 - `Sources/ChatCore` Foundation-only client, SSE decoding, `<think>` splitting, persistence.
 - `Sources/ChatUI` SwiftUI views and `ChatStore`. Public entry point is `RootView`.
 - `Sources/chatcli` command-line client built on ChatCore.
-- `Sources/uisnapshot` macOS-only tool that renders every theme to PNGs: `swift run uisnapshot <outdir>`.
+- `Sources/uisnapshot` macOS-only tool that renders every theme to PNGs: `swift run uisnapshot <outdir>`. Set `UISNAPSHOT_THEMES=light,dark` to render only some.
 - `App/` the only code in the Xcode app target.
 - `scripts/mock_openai_server.py` stdlib mock server for offline testing.
 
@@ -33,7 +33,11 @@ A bare host gets `http://` and `/v1` added. Anything with an explicit scheme or 
 
 The photo button beside the message field attaches up to four photos. Each is downscaled to 1536 px on its long edge and sent as a JPEG `image_url` part, so the model has to accept images. A text-only model's refusal shows in the error banner. Photos are saved as files in `images/` beside `conversations.json`, which holds only their IDs, so saving a chat stays fast however many photos it has.
 
-Pick an image model and the message field asks for a description. The prompt goes to `/v1/images/generations` and the picture comes back in the reply. Tap it to view it full screen, or long-press to share or save it. An image model sees only your newest message, so it keeps no history and ignores attached photos, and slash commands are off. The app knows a model makes images when an SGLang diffusion server lists it with a task type ending in `2i` (such as `t2i`), or when OpenAI lists it as `gpt-image-*` or `chatgpt-image-latest`. The mock server's `mock-image` model behaves the same way.
+Pictures come from an image model that chat models call as a tool, not from chatting with the image model. Settings › Image Generation picks one of the image models a saved connection serves, fetched with that connection's own key, or None. With one picked, every reply offers the model a `generate_image` tool beside any MCP tools, so use a chat model that supports tool calling. Ask in plain language, such as "draw a red fox in snow, widescreen", or attach a photo and say "make it night". The model writes a detailed prompt, an optional aspect ratio and resolution, and the numbers of the pictures to edit, and the app sends them to the image connection. With no source pictures that is `/v1/images/generations`. With source pictures it is `/v1/images/edits` as a multipart form. The picture shows in the reply. Tap it to view it full screen, or long-press to share or save it. The tool asks for no approval, since it only adds a picture to the chat. If the image server refuses, the model is handed its message and can explain or try again.
+
+Settings › Web Pages has a Fetch web pages switch, off by default. With it on, every reply offers the model a `fetch_url` tool, so a link you paste can be read by a chat model that supports tool calling. The app fetches the page from this device with a plain GET (20 s without data and 30 s in all, 2 MB cap, `User-Agent: LMChat/1.0`, no cookies, no credentials), turns HTML into text, and hands the model the title, the final address and up to 20,000 characters. It refuses anything but http and https, addresses with a user name or password, and local or private hosts (`localhost`, `.local`, `.internal`, loopback, link-local, private and carrier-NAT ranges such as Tailscale's 100.64.0.0/10, IPv4 written as a number or carried inside an IPv6 address, any name that resolves to one, and any name that resolves to nothing), on the first address and on every redirect, and it refuses to return a page whose connection really went to one. Pages that aren't text, such as a PDF, come back as a short error the model can relay. It reads a page without asking only when its host appears in one of your messages in that chat. Any other address, such as one a page told the model to fetch, waits for you to allow it, with the whole address shown. Each fetch shows in the reply's Inspect list as a Page request.
+
+Every picture in a chat, the photos you attached and the ones the tool drew, is labelled "image 1", "image 2" and so on in order, so "now make it night" can edit image 1. The model learns your photos' labels from a note added to your message as it is sent, such as `(Attached: image 1)`, and a drawn picture's label from the tool's result. Your message is stored as you typed it. Pictures the tool drew are never sent back to the model as pixels. A size is sent as `WxH` rounded to a multiple of 16. An edit that names no shape or size asks for its first source picture's own, because SGLang refuses an edit without one. OpenAI gets a size only when the model names one. The app knows a model makes images when an SGLang diffusion server lists it with a task type ending in `2i` in any letter case (such as `t2i` or `I2I`), or when OpenAI lists it as `gpt-image-*` or `chatgpt-image-latest`. Such models are left out of the chat model picker. The mock server lists a `mock-image` model on both image endpoints, but its chat models never call `generate_image`.
 
 Long-press a message you sent and choose Edit to change it. Sending the edit asks the model again from that point and erases everything after it. Photos only the erased messages used are deleted.
 
@@ -47,17 +51,31 @@ Settings › MCP Connections adds MCP servers that give the model tools. Tools f
 
 The mock server also speaks MCP at `/mcp` (all tools) and `/mcp/readonly`, with the token `mock-token`, and its models call a tool when a prompt says "use <tool name>".
 
+## Developer tools
+
+Every request the app makes for a reply is kept in memory beside it, with your key shown as `$API_KEY`. Long-press a reply and choose Inspect, or tap the line under it, such as `0.8 s to first token · 42 tok/s · 1,204 tokens`. A server that reports no token counts gets only the time. The sheet opens on a summary, then one row per request: the reply's own, the one a tool made for a picture, and any you resend. A failed request shows its status and the server's message in red. Tap a row for its request and response as text, with the headers above and Copy, Copy as curl and Edit and Resend below. Photos show as short tokens such as `<image 1: 312 KB>`, in the text and in the curl command. A text over 20,000 characters shows its start and its end and says how much it left out. Copy still takes all of it. Requests are not saved. After a relaunch old replies have no Inspect, editing, retrying or deleting drops a reply's requests, and only the newest 40 requests or 24 MB of bodies are kept. A reply that fails before it shows anything has no message to hang its request on, so it stays behind the error banner's Inspect request until you dismiss the error or retry.
+
+Edit and Resend opens the request body in a plain text editor. Send posts it to the same address with that connection's key, or the image connection's key for a picture request, and adds the answer as a Resent request. The chat is never changed. Leave a photo token where it is to send the photo again.
+
+When the app changes a request for you, the reply says so in a caption under it. Tools are left out when the server refuses them, and stay out of later replies from that model until you quit the app. Reasoning is turned off when the model takes tools only that way. A reasoning level is swapped when the model doesn't take the one you picked. A size is noted when the app chose it for an image edit. Token counts are not asked for when the server refuses `stream_options`. These notes are saved with the chat.
+
+Settings › Connections › a connection › Check Model asks that connection's chosen model what it supports when you tap Run Check, with a handful of one-token requests. It reports tools (yes, no, or only with reasoning off), vision, the reasoning levels it takes, and the context length when the server says. A Server details list holds what the model list entry and SGLang's `/server_info` add, leaving out anything named like a key. A no or unknown comes with the server's own words. The result stays until you quit the app. For the connection in use, a result of no tools, or tools only with reasoning off, is used at once, so the first real request doesn't have to fail to find out.
+
 ## chatcli
 
 ```sh
 swift run chatcli --base 127.0.0.1:1234 --models
 swift run chatcli --base 127.0.0.1:1234 --model <id> [--key K] [--effort low] "Hello"
 swift run chatcli --base 127.0.0.1:1234 --model <id> --efforts
+swift run chatcli --base 127.0.0.1:1234 --model <id> --capabilities
+swift run chatcli --base 127.0.0.1:1234 --model <id> --inspect "Hello"
 swift run chatcli --base 127.0.0.1:1234 --title "what is NVFP4?"
+swift run chatcli --fetch https://example.com
 swift run chatcli --base 127.0.0.1:1234 --model <id> --image photo.heic "What is in this photo?"
+swift run chatcli --base 127.0.0.1:8099 --model mock-image --image-out out.png --ar 16:9 --res 1280 "a red fox in snow"
 ```
 
-Reasoning goes to stderr dimmed, the answer to stdout. Failures exit non-zero. `--title` prints the title the app would give a chat starting with that prompt. `--efforts` prints the reasoning effort levels the model accepts, the same check the app runs before showing its effort slider. `--image` attaches a photo, prepared the way the app prepares one, and can repeat. `--image-out <file>` sends the prompt to an image model and writes the picture it returns.
+`--fetch <url>` needs no server: it prints what the model would get from the `fetch_url` tool for that address. Reasoning goes to stderr dimmed, the answer to stdout. Failures exit non-zero. `--title` prints the title the app would give a chat starting with that prompt. `--efforts` prints the reasoning effort levels the model accepts, the same check the app runs before showing its effort slider. `--capabilities` asks the model whether it takes tools and pictures, which reasoning levels it accepts and how much context it has, with a handful of one-token requests. `--inspect` adds every request the run made, after the reply: status, timing, token counts, then a `curl` command that repeats it with `$API_KEY` for the key. `--image` attaches a photo, prepared the way the app prepares one, and can repeat. `--image-out <file>` probes an image server. It sends the prompt straight to the image model, with no chat model or tool in between, and writes the picture it returns. Add `--image` and the model edits those photos instead. `--ar W:H` picks the shape and `--res N` the long edge, as in `--ar 16:9 --res 1280`. `--res` takes `1k`, `2k`, `4k`, or 256 to 4096 pixels.
 
 ## Smoke test against your server
 
@@ -76,3 +94,7 @@ swift test            # with Xcode installed
 scripts/test.sh       # with Command Line Tools only
 python3 scripts/mock_openai_server.py --port 8099
 ```
+
+`scripts/live_test.sh LiveDevToolsTests` drives the real `ChatStore` against a real chat model. It sends a short prompt and checks that the reply kept a 200 request with token counts and a first-token time under the total time, and that the key is nowhere in it. It writes the request's curl command, resends it with the prompt changed to ask for the word PINEAPPLE, checks the answer and that the chat is unchanged, and writes the Check Model report as text. It needs only `LIVE_CHAT_BASE`, `LIVE_CHAT_KEY` and `LIVE_CHAT_MODEL`, and `LIVE_OUT_DIR` keeps `request.curl.sh` and `capabilities.txt`.
+
+`scripts/live_test.sh` alone drives the real `ChatStore` against a real chat model and a real image model. It asks for a red fox in snow, widescreen, then for it at night, and checks that two pictures come back, the first wider than tall, and that the second call edits image 1. Set `LIVE_CHAT_BASE`, `LIVE_CHAT_KEY`, `LIVE_CHAT_MODEL`, `LIVE_IMAGE_BASE`, `LIVE_IMAGE_KEY` and `LIVE_IMAGE_MODEL` in `.env` or the shell, and `LIVE_OUT_DIR` to keep the pictures. Without all six the test is skipped.
