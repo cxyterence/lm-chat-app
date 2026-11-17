@@ -98,7 +98,8 @@ private final class ContinuedReply {
     private func started(_ task: BGTask) {
         guard case .submitted = state, let task = task as? BGContinuedProcessingTask else { return task.setTaskCompleted(success: false) }
         state = .running(task)
-        task.expirationHandler = { [self] in MainActor.assumeIsolated { onCancel() } }
+        // The header names no queue for this handler, so hop to the main actor rather than assume it.
+        task.expirationHandler = { [self] in Task { @MainActor in onCancel() } }
         update(characters)
     }
 
