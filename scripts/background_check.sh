@@ -78,9 +78,9 @@ if [ -z "${ONLY:-}" ] || [ "$ONLY" = kept ]; then
     left_at="$(now)"
     xcrun simctl launch "$UDID" com.apple.mobilesafari >/dev/null
     python3 - "$(xcrun simctl get_app_container "$UDID" "$APP_ID" data)/Library/Application Support/LMChat/conversations.json" \
-        "$left_at" $((SECONDS_LONG + 30)) <<'PY'
-import json, sys, time
-path, left_at, budget = sys.argv[1], float(sys.argv[2]), int(sys.argv[3])
+        "$left_at" $((SECONDS_LONG + 30)) "$MOCK_LOG" <<'PY'
+import json, os, re, sys, time
+path, left_at, budget, mock_log = sys.argv[1], float(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
 
 def reply():
     try:
@@ -102,6 +102,13 @@ while time.time() < left_at + budget and not finished:
     time.sleep(0.5)
 print(f"the reply on disk last grew {changed_at - left_at:.1f}s after the app left the foreground ({chars} characters, "
       f"{'finished' if finished else f'not finished after {budget}s'})")
+# The file is replaced whole, so its modification time is when the finished reply landed, to better than the poll.
+written = re.search(r"^\[([0-9.]+)\] stream written", open(mock_log).read(), re.M)
+if finished and written:
+    print(f"lag: the app's file showed the finished reply {os.path.getmtime(path) - float(written.group(1)):.1f}s after "
+          "the mock finished writing it (the iOS grant is about 30s from leaving the foreground)")
+else:
+    print("lag: not measured (the reply did not finish or the mock did not log that it finished writing)")
 PY
     started_at="$(sed -n 's/^\[\([0-9.]*\)\] slow stream start.*/\1/p' "$MOCK_LOG" | head -1)"
     python3 -c "import sys; print(f'the app left the foreground {float(sys.argv[1]) - float(sys.argv[2]):.1f}s into the stream')" "$left_at" "${started_at:-0}"

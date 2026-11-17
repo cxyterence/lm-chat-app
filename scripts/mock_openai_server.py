@@ -405,6 +405,7 @@ class Handler(BaseHTTPRequestHandler):
                 time.sleep(max(0, 0.25 - (time.monotonic() - before)))
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
+            log(f"stream written: the last word and [DONE] are on the socket (t={time.monotonic() - started:.1f}s)")
             self.connection.shutdown(socket.SHUT_WR)
             self.connection.settimeout(10)
             closed = self.wait_for_close()
