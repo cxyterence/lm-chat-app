@@ -3,8 +3,8 @@
 # leaves the screen. Needs a Debug build, because the app's launch arguments exist only there.
 #   UDID=<simulator> scripts/background_check.sh
 # Other settings: SOURCE_DIR (the checkout to build, default this one), WORK (scratch folder), PORT (default 8188),
-# SLOW_SECONDS (length of the streamed reply, default 25), ONLY=kept or killed to run one case,
-# SCREENSHOT (where the relaunched app is captured).
+# SLOW_SECONDS (length of the streamed reply, default 25), ONLY=kept, killed or dropped to run one case,
+# SCREENSHOT and DROPPED_SCREENSHOT (where the relaunched app and the app after a dropped stream are captured).
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="${SOURCE_DIR:-$ROOT}"
@@ -13,6 +13,7 @@ PORT="${PORT:-8188}"
 SECONDS_LONG="${SLOW_SECONDS:-25}"
 WORK="${WORK:-$(mktemp -d)}"
 SCREENSHOT="${SCREENSHOT:-$WORK/relaunched.png}"
+DROPPED_SCREENSHOT="${DROPPED_SCREENSHOT:-$WORK/dropped.png}"
 APP_ID=com.local.lmchat
 FAILED=0
 MOCK_PID=""
@@ -44,7 +45,7 @@ fresh_install() {
 }
 
 launch_with_reply() {
-    xcrun simctl launch "$UDID" "$APP_ID" --debug-server "http://127.0.0.1:$PORT/v1" --debug-send "/slow $SECONDS_LONG" >/dev/null
+    xcrun simctl launch "$UDID" "$APP_ID" --debug-server "http://127.0.0.1:$PORT/v1" --debug-send "/slow $SECONDS_LONG ${1:-}" >/dev/null
 }
 
 # What the app saved: "assistant_chars interrupted ends_with_END", or "none".
@@ -77,30 +78,30 @@ if [ -z "${ONLY:-}" ] || [ "$ONLY" = kept ]; then
     left_at="$(now)"
     xcrun simctl launch "$UDID" com.apple.mobilesafari >/dev/null
     python3 - "$(xcrun simctl get_app_container "$UDID" "$APP_ID" data)/Library/Application Support/LMChat/conversations.json" \
-        "$MOCK_LOG" "$left_at" $((SECONDS_LONG + 20)) <<'PY'
-import json, re, sys, time
-path, log, left_at, budget = sys.argv[1], sys.argv[2], float(sys.argv[3]), int(sys.argv[4])
+        "$left_at" $((SECONDS_LONG + 30)) <<'PY'
+import json, sys, time
+path, left_at, budget = sys.argv[1], float(sys.argv[2]), int(sys.argv[3])
 
-def reply_chars():
+def reply():
     try:
         messages = [m for c in json.load(open(path)) for m in c["messages"] if m["role"] == "assistant"]
     except (OSError, ValueError):
-        return 0
-    return len(messages[-1]["content"]) if messages else 0
+        return 0, False
+    if not messages:
+        return 0, False
+    last = messages[-1]
+    return len(last["content"]), last["content"].rstrip().endswith("END") and not last.get("interrupted", False)
 
-last, changed_at = 0, left_at
-for _ in range(budget):
-    chars = reply_chars()
-    if chars != last:
-        last, changed_at = chars, time.time()
-    if re.search(r"stream (complete|broken)", open(log).read()):
-        break
-    time.sleep(1)
-time.sleep(3)
-chars = reply_chars()
-if chars != last:
-    changed_at = time.time()
-print(f"the reply on disk last grew {changed_at - left_at:.1f}s after the app left the foreground ({chars} characters)")
+# A backgrounded app reads the stream later than the server writes it, so the server finishing says nothing about
+# the app. Wait for the app's own file.
+chars, changed_at, finished = 0, left_at, False
+while time.time() < left_at + budget and not finished:
+    now_chars, finished = reply()
+    if now_chars != chars:
+        chars, changed_at = now_chars, time.time()
+    time.sleep(0.5)
+print(f"the reply on disk last grew {changed_at - left_at:.1f}s after the app left the foreground ({chars} characters, "
+      f"{'finished' if finished else f'not finished after {budget}s'})")
 PY
     started_at="$(sed -n 's/^\[\([0-9.]*\)\] slow stream start.*/\1/p' "$MOCK_LOG" | head -1)"
     python3 -c "import sys; print(f'the app left the foreground {float(sys.argv[1]) - float(sys.argv[2]):.1f}s into the stream')" "$left_at" "${started_at:-0}"
@@ -130,6 +131,36 @@ if [ -z "${ONLY:-}" ] || [ "$ONLY" = killed ]; then
     xcrun simctl launch "$UDID" "$APP_ID" >/dev/null
     sleep 4
     xcrun simctl io "$UDID" screenshot "$SCREENSHOT" >/dev/null 2>&1 && echo "screenshot of the relaunched app: $SCREENSHOT"
+fi
+
+if [ -z "${ONLY:-}" ] || [ "$ONLY" = dropped ]; then
+    start_mock dropped
+    fresh_install
+    launch_with_reply "drop 12"
+    sleep 5
+    xcrun simctl launch "$UDID" com.apple.mobilesafari >/dev/null
+    # The app reads later than the server writes, so wait for the app's own file to show the reply ended.
+    python3 - "$(xcrun simctl get_app_container "$UDID" "$APP_ID" data)/Library/Application Support/LMChat/conversations.json" <<'PY'
+import json, sys, time
+for _ in range(120):
+    try:
+        messages = [m for c in json.load(open(sys.argv[1])) for m in c["messages"] if m["role"] == "assistant"]
+    except (OSError, ValueError):
+        messages = []
+    if messages and not messages[-1].get("interrupted", False):
+        break
+    time.sleep(0.5)
+PY
+    xcrun simctl launch "$UDID" "$APP_ID" >/dev/null
+    sleep 3
+    xcrun simctl io "$UDID" screenshot "$DROPPED_SCREENSHOT" >/dev/null 2>&1
+    set -- $(saved_reply)
+    if grep -q "stream dropped" "$MOCK_LOG" && [ "${1:-none}" != none ] && [ "$1" -gt 0 ] && [ "$2" = false ] && [ "$3" = false ]; then
+        result "dropped" ok "the stream was reset in the background and the app kept $1 characters of the reply; screenshot: $DROPPED_SCREENSHOT"
+    else
+        result "dropped" fail "mock: $(grep -E 'stream (complete|broken|dropped)' "$MOCK_LOG" | head -1 | cut -c1-140 || true); saved: ${1:-none} characters, interrupted: ${2:-false}, ends with END: ${3:-false}"
+    fi
+    stop_mock
 fi
 
 exit $FAILED
