@@ -8,17 +8,31 @@ private final class FakeBackgroundTime {
     private(set) var begun = 0
     private(set) var ended = 0
     private var expire: (@MainActor () -> Void)?
+    private var cancel: (@MainActor () -> Void)?
+    /// Whether the system gives a continued processing task when asked.
+    var grantsCover = true
+    private(set) var coversAsked = 0
+    private(set) var coverUpdates: [Int] = []
+    private(set) var coverFinishes: [Bool] = []
 
     var time: BackgroundTime {
-        BackgroundTime { [self] onExpiry in
-            begun += 1
-            expire = onExpiry
-            return { [self] in ended += 1 }
-        }
+        BackgroundTime(
+            begin: { [self] onExpiry in
+                begun += 1
+                expire = onExpiry
+                return { [self] in ended += 1 }
+            },
+            cover: { [self] onCancel in
+                coversAsked += 1
+                guard grantsCover else { return nil }
+                cancel = onCancel
+                return ReplyCover(update: { [self] in coverUpdates.append($0) }, finish: { [self] in coverFinishes.append($0) })
+            })
     }
 
     var isHeld: Bool { begun > ended }
     func expireNow() { expire?() }
+    func cancelFromSystem() { cancel?() }
 }
 
 private final class Clock: @unchecked Sendable {
@@ -271,5 +285,166 @@ struct BackgroundReplyTests {
         let id = try #require(s.store.selectedConversation?.id)
         let message = try #require(s.store.failureMessage(for: id))
         #expect(message != ChatStore.backgroundFailure)
+    }
+
+    // MARK: Continued processing task
+
+    @Test func aReplySentWhileTheAppIsInFrontAsksForNoTaskSoThePersonSeesNoBanner() async {
+        let s = setUp()
+        defer { s.rig.cleanup() }
+
+        await startReply(s)
+
+        #expect(s.fake.coversAsked == 0)
+    }
+
+    @Test func aboutToLeaveAsksForOneTaskForTheReplyThatIsStreamingAndTellsItWhatHasArrived() async {
+        let s = setUp()
+        defer { s.rig.cleanup() }
+        await startReply(s)
+
+        s.store.appWillLeave()
+        s.store.appWillLeave()
+
+        #expect(s.fake.coversAsked == 1)
+        #expect(s.fake.coverUpdates == ["Hello ".count])
+    }
+
+    @Test func nothingStreamingAsksForNoTask() {
+        let s = setUp()
+        defer { s.rig.cleanup() }
+
+        s.store.appWillLeave()
+
+        #expect(s.fake.coversAsked == 0)
+    }
+
+    @Test func theTaskHearsOfTheTextAsItArrivesAtTheSaveInterval() async {
+        let s = setUp()
+        defer { s.rig.cleanup() }
+        await startReply(s)
+        s.store.appWillLeave()
+        s.store.appMovedToBackground()
+
+        s.server.deliver(["too soon "])
+        await streamed(s.store, "Hello too soon ")
+        #expect(s.fake.coverUpdates == [6], "within the interval nothing more is sent")
+        s.clock.advance(2.5)
+        s.server.deliver(["later"])
+        await streamed(s.store, "Hello too soon later")
+
+        #expect(s.fake.coverUpdates == [6, "Hello too soon later".count])
+    }
+
+    @Test func theGrantIsAskedForAlongsideTheTaskAndWhenTheSystemRefusesTheTaskTheReplyStillGetsIt() async {
+        let held = setUp()
+        defer { held.rig.cleanup() }
+        await startReply(held)
+        held.store.appWillLeave()
+        held.store.appMovedToBackground()
+        #expect(held.fake.coversAsked == 1 && held.fake.begun == 1 && held.fake.isHeld)
+
+        let refused = setUp()
+        defer { refused.rig.cleanup() }
+        refused.fake.grantsCover = false
+        await startReply(refused)
+        refused.store.appWillLeave()
+        refused.store.appMovedToBackground()
+        #expect(refused.fake.coversAsked == 1 && refused.fake.begun == 1 && refused.fake.isHeld)
+        refused.server.deliver(["on "])
+        refused.server.endStreams()
+        await untilIdle(refused.store)
+        #expect(refused.store.selectedConversation?.messages.last?.content == "Hello on ")
+        #expect(refused.fake.coverFinishes.isEmpty, "there was no task to finish")
+    }
+
+    @Test func theTaskIsFinishedAsSuccessWhenTheReplyFinishes() async {
+        let s = setUp()
+        defer { s.rig.cleanup() }
+        await startReply(s)
+        s.store.appWillLeave()
+        s.store.appMovedToBackground()
+
+        s.server.endStreams()
+        await untilIdle(s.store)
+
+        #expect(s.fake.coverFinishes == [true])
+        s.store.appBecameActive()
+        #expect(s.fake.coverFinishes == [true], "coming back does not finish it again")
+    }
+
+    @Test func theTaskIsFinishedAsFailureWhenTheReplyFails() async throws {
+        let s = setUp()
+        defer { s.rig.cleanup() }
+        await startReply(s)
+        s.store.appWillLeave()
+        s.store.appMovedToBackground()
+
+        s.server.dropStreams()
+        await untilIdle(s.store)
+
+        #expect(s.fake.coverFinishes == [false])
+        #expect(s.store.failureMessage(for: try #require(s.store.selectedConversation?.id)) != nil)
+    }
+
+    @Test func theTaskIsFinishedWhenThePersonStopsTheReplyAndWhatArrivedIsKept() async throws {
+        let s = setUp()
+        defer { s.rig.cleanup() }
+        await startReply(s)
+        s.store.appWillLeave()
+
+        s.store.stop()
+        await untilIdle(s.store)
+
+        #expect(s.fake.coverFinishes == [true])
+        #expect(s.store.selectedConversation?.messages.last?.content == "Hello ")
+    }
+
+    @Test func cancellingFromTheSystemStopsTheReplyLikeStopAndKeepsTheText() async throws {
+        let s = setUp()
+        defer { s.rig.cleanup() }
+        await startReply(s)
+        s.store.appWillLeave()
+        s.store.appMovedToBackground()
+        s.server.deliver(["so far "])
+        await streamed(s.store, "Hello so far ")
+
+        s.fake.cancelFromSystem()
+        await untilIdle(s.store)
+
+        #expect(!s.store.isBusy)
+        let message = try #require(s.store.selectedConversation?.messages.last)
+        #expect(message.content == "Hello so far ")
+        #expect(s.store.failureMessage(for: try #require(s.store.selectedConversation?.id)) == nil)
+        let saved = try #require(try savedReply(s))
+        #expect(saved.content == "Hello so far " && !saved.interrupted)
+        #expect(s.fake.coverFinishes == [true])
+    }
+
+    @Test func comingBackToTheAppEndsTheTaskAndTheReplyCarriesOn() async {
+        let s = setUp()
+        defer { s.rig.cleanup() }
+        await startReply(s)
+        s.store.appWillLeave()
+
+        s.store.appBecameActive()
+
+        #expect(s.fake.coverFinishes == [true])
+        #expect(s.store.isBusy)
+        s.store.appWillLeave()
+        #expect(s.fake.coversAsked == 2, "leaving again asks again")
+    }
+
+    @Test func progressMovesWithTheTextAndNeverReachesItsTotalBeforeTheReplyEnds() {
+        var previous = 0.0
+        for characters in [0, 1, 100, 1_000, 10_000, 100_000, 1_000_000] {
+            let (completed, total) = ReplyCover.progress(characters: characters)
+            let fraction = Double(completed) / Double(total)
+            #expect(fraction >= previous && fraction < 1)
+            previous = fraction
+        }
+        #expect(ReplyCover.progress(characters: 1_000).completed == 1_000)
+        #expect(ReplyCover.subtitle(characters: 0) == "Waiting for the model")
+        #expect(ReplyCover.subtitle(characters: 1204) == "1,204 characters")
     }
 }

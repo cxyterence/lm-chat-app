@@ -145,6 +145,8 @@ public final class ChatStore {
     @ObservationIgnored private let now: () -> Date
     /// Ends the extra time iOS gave. Held only while a reply streams and the app is in the background.
     @ObservationIgnored private var endBackgroundTime: (() -> Void)?
+    /// The continued processing task covering the reply that is streaming, if the system gave one.
+    @ObservationIgnored private var cover: ReplyCover?
     @ObservationIgnored private var lastPartialSave = Date.distantPast
     /// Every write of the chat file goes through here, in order, so a slow write of a reply in progress can't land
     /// after the save that follows it.
@@ -622,7 +624,20 @@ public final class ChatStore {
         if case .streaming(_, let task) = generation { task.cancel() }
     }
 
-    /// Saves what has arrived and asks iOS for time to keep the reply coming.
+    /// The app is about to leave the screen, or may only be pulling down Control Center. A continued processing task
+    /// shows the person a system banner, so a reply asks for one only here and not each time one is sent.
+    func appWillLeave() {
+        guard cover == nil, case .streaming(let id, _) = generation,
+              conversations.first(where: { $0.id == id })?.messages.last?.role == .assistant
+        else { return }
+        cover = background.cover { [weak self] in self?.stop() }
+        cover?.update(charactersReceived)
+    }
+
+    private var charactersReceived: Int { liveReply.map { $0.content.count + $0.reasoning.count } ?? 0 }
+
+    /// Saves what has arrived and asks iOS for time to keep the reply coming. The grant is asked for even when a task
+    /// covers the reply, since a task the system queues may not start for a while.
     func appMovedToBackground() {
         guard isBusy else { return }
         leftWhileStreaming = true
@@ -634,11 +649,19 @@ public final class ChatStore {
         }
     }
 
-    func appBecameActive() { releaseBackgroundTime() }
+    func appBecameActive() {
+        releaseBackgroundTime()
+        releaseCover(success: true)
+    }
 
     private func releaseBackgroundTime() {
         endBackgroundTime?()
         endBackgroundTime = nil
+    }
+
+    private func releaseCover(success: Bool) {
+        cover?.finish(success)
+        cover = nil
     }
 
     func retry() {
@@ -1083,6 +1106,7 @@ public final class ChatStore {
         }
         if liveReply?.messageID == messageID { liveReply = nil }
         releaseBackgroundTime()
+        if case .failed = outcome { releaseCover(success: false) } else { releaseCover(success: true) }
         if case .failed(let message) = outcome {
             generation = .failed(conversationID: id, message: message, request: request)
         } else {
@@ -1097,6 +1121,7 @@ public final class ChatStore {
         guard time.timeIntervalSince(lastPartialSave) >= Self.partialSaveInterval else { return }
         lastPartialSave = time
         persist(inBackground: true)
+        cover?.update(charactersReceived)
     }
 
     /// Returns once every save asked for so far is on disk.

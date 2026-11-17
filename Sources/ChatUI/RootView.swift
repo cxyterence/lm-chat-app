@@ -21,6 +21,7 @@ public struct RootView: View {
         .theme(store.theme)
         .onChange(of: scenePhase) { _, phase in
             switch phase {
+            case .inactive: store.appWillLeave()
             case .background: store.appMovedToBackground()
             case .active: store.appBecameActive()
             default: break
