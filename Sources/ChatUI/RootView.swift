@@ -19,9 +19,9 @@ public struct RootView: View {
             }
         }
         .theme(store.theme)
-        .onChange(of: scenePhase) { _, phase in
+        .onChange(of: scenePhase) { old, phase in
             switch phase {
-            case .inactive: store.appWillLeave()
+            case .inactive where old == .active: store.appWillLeave()
             case .background: store.appMovedToBackground()
             case .active: store.appBecameActive()
             default: break
