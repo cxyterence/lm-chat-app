@@ -98,6 +98,9 @@ public final class ChatStore {
     static let partialSaveInterval: TimeInterval = 2
 
     static let backgroundFailure = "The reply stopped while the app was in the background."
+    /// How long after the app comes back a dropped connection is still taken as the background's doing, since one that
+    /// died while the app was suspended only shows up once it runs again.
+    static let backgroundGrace: TimeInterval = 5
     static let systemStopped = "The system stopped the reply in the background."
 
     /// Settings from before connections existed, read once to build the first connection.
@@ -154,6 +157,8 @@ public final class ChatStore {
     @ObservationIgnored private let writer = DispatchQueue(label: "ChatStore.writer")
     /// Whether the app left the screen while the current reply streamed.
     @ObservationIgnored private var leftWhileStreaming = false
+    @ObservationIgnored private var inBackground = false
+    @ObservationIgnored private var lastBecameActive = Date.distantPast
     /// Whether the system ended the continued task, which stops the reply.
     @ObservationIgnored private var stoppedBySystem = false
     /// Characters of the rounds of this reply that are already finished.
@@ -651,6 +656,7 @@ public final class ChatStore {
     /// Saves what has arrived and asks iOS for time to keep the reply coming. The grant is asked for even when a task
     /// covers the reply, since a task the system queues may not start for a while.
     func appMovedToBackground() {
+        inBackground = true
         guard isBusy else { return }
         leftWhileStreaming = true
         persist()
@@ -662,6 +668,8 @@ public final class ChatStore {
     }
 
     func appBecameActive() {
+        inBackground = false
+        lastBecameActive = now()
         releaseBackgroundTime()
         releaseCover(success: true)
     }
@@ -914,11 +922,16 @@ public final class ChatStore {
             if Task.isCancelled { outcome = .cancelled }
         } catch {
             // A dropped connection after the app left the screen is iOS's doing, not the server's.
-            let message = leftWhileStreaming && error is URLError ? Self.backgroundFailure : error.localizedDescription
+            let message = blamesBackground(error) ? Self.backgroundFailure : error.localizedDescription
             outcome = Task.isCancelled ? .cancelled : .failed(message)
         }
         if stoppedBySystem, outcome == .cancelled { outcome = .failed(Self.systemStopped) }
         finish(conversationID: id, messageID: current, request: request, outcome: outcome)
+    }
+
+    private func blamesBackground(_ error: Error) -> Bool {
+        leftWhileStreaming && error is URLError
+            && (inBackground || now().timeIntervalSince(lastBecameActive) <= Self.backgroundGrace)
     }
 
     private func beginOutput(in id: UUID, role: Role) -> UUID {

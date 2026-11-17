@@ -333,6 +333,43 @@ struct BackgroundReplyTests {
         #expect(s.store.selectedConversation?.messages.map(\.content).suffix(2) == ["hi", "Second try"])
     }
 
+    @Test func aStreamThatDiesWhileTheAppIsStillInTheBackgroundIsLabelledSo() async throws {
+        let s = setUp()
+        defer { s.rig.cleanup() }
+        await startReply(s)
+        s.store.appMovedToBackground()
+        s.clock.advance(120)
+
+        s.server.dropStreams()
+        await untilIdle(s.store)
+
+        #expect(s.store.failureMessage(for: try #require(s.store.selectedConversation?.id)) == ChatStore.backgroundFailure)
+    }
+
+    @Test func aStreamThatDiesJustAfterTheAppComesBackIsLabelledBackgroundButNotLongAfter() async throws {
+        let soon = setUp()
+        defer { soon.rig.cleanup() }
+        await startReply(soon)
+        soon.store.appMovedToBackground()
+        soon.store.appBecameActive()
+        soon.clock.advance(ChatStore.backgroundGrace - 1)
+        soon.server.dropStreams()
+        await untilIdle(soon.store)
+        #expect(soon.store.failureMessage(for: try #require(soon.store.selectedConversation?.id)) == ChatStore.backgroundFailure)
+
+        let late = setUp()
+        defer { late.rig.cleanup() }
+        await startReply(late)
+        late.store.appMovedToBackground()
+        late.store.appBecameActive()
+        late.clock.advance(ChatStore.backgroundGrace + 1)
+        late.server.dropStreams()
+        await untilIdle(late.store)
+        let lateID = try #require(late.store.selectedConversation?.id)
+        let message = try #require(late.store.failureMessage(for: lateID))
+        #expect(message != ChatStore.backgroundFailure, "a real error with the app in front is not blamed on the background")
+    }
+
     @Test func aStreamThatDiesWhileTheAppIsInFrontKeepsTheNetworkError() async throws {
         let s = setUp()
         defer { s.rig.cleanup() }
