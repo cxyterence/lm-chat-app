@@ -12,7 +12,7 @@ struct ChatView: View {
     @State private var editing: (id: UUID, stash: (text: String, images: [ImageID]))?
     @FocusState private var composerFocused: Bool
     @State private var atBottom = true
-    @State private var following = true
+    @State private var follow = Follow.following
     @State private var inspecting: InspectedReply?
     @Environment(\.palette) private var palette
 
@@ -64,9 +64,17 @@ struct ChatView: View {
                 }
                 .padding()
                 .animation(.smooth(duration: 0.35), value: live.messages.count)
+                .disclosureGroupStyle(HeaderOnTop { opened in
+                    guard FollowStream.supported else { return }
+                    if opened, follow == .following {
+                        follow = .reading
+                    } else if !opened, follow == .reading {
+                        follow = .following
+                        scrollToBottom(proxy)
+                    }
+                })
             }
-            .defaultScrollAnchor(.bottom)
-            .modifier(FollowStream(atBottom: $atBottom, following: $following) { scrollToBottom(proxy) })
+            .modifier(FollowStream(atBottom: $atBottom, follow: $follow) { scrollToBottom(proxy) })
             .scrollDismissesKeyboard(.interactively)
             .simultaneousGesture(TapGesture().onEnded { composerFocused = false })
             .overlay {
@@ -81,7 +89,7 @@ struct ChatView: View {
             .overlay(alignment: .bottom) {
                 if scrolledAway && !live.messages.isEmpty {
                     JumpToLatest {
-                        following = true
+                        follow = .following
                         scrollToBottom(proxy)
                     }
                         .padding(.bottom, 12)
@@ -93,14 +101,21 @@ struct ChatView: View {
                 if !FollowStream.supported && atBottom { proxy.scrollTo("bottom") }
             }
             .onChange(of: live.messages.count) {
-                following = true
+                follow = .following
                 scrollToBottom(proxy)
             }
         }
     }
 
     /// The reader moved away from the newest text. Being briefly off the bottom during an eased scroll doesn't count.
-    private var scrolledAway: Bool { FollowStream.supported ? !following : !atBottom }
+    private var scrolledAway: Bool {
+        guard FollowStream.supported else { return !atBottom }
+        switch follow {
+        case .following: return false
+        case .reading: return !atBottom
+        case .away: return true
+        }
+    }
 
     /// Matches the reply bubble's height easing so a new line and the scroll move together.
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
@@ -518,6 +533,51 @@ private struct SummaryCard: View {
     }
 }
 
+/// The system style lays the content over the header for touches, and selectable text takes touches from a
+/// little beyond its frame, so the lower half of an open header ignored taps. This one keeps the header on top.
+/// `toggled` tells the chat, which holds the list still while a section it was following is open.
+private struct HeaderOnTop: DisclosureGroupStyle {
+    let toggled: (_ opened: Bool) -> Void
+
+    func makeBody(configuration: Configuration) -> some View {
+        Stack(configuration: configuration, toggled: toggled)
+    }
+
+    private struct Stack: View {
+        let configuration: Configuration
+        let toggled: (Bool) -> Void
+        @Environment(\.palette) private var palette
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 0) {
+                Button {
+                    let open = !configuration.isExpanded
+                    toggled(open)
+                    withAnimation(.snappy(duration: 0.2)) { configuration.isExpanded = open }
+                } label: {
+                    HStack {
+                        configuration.label
+                        Spacer(minLength: 8)
+                        Image(systemName: "chevron.right")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(palette.text)
+                            .rotationEffect(.degrees(configuration.isExpanded ? 90 : 0))
+                            .accessibilityHidden(true)
+                    }
+                    .padding(.vertical, 4)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityValue(configuration.isExpanded ? "Expanded" : "Collapsed")
+                .zIndex(1)
+                if configuration.isExpanded {
+                    configuration.content
+                }
+            }
+        }
+    }
+}
+
 /// Reveals streamed text at a steady pace. Text that existed before the view appeared shows at once.
 private struct Paced<Content: View>: View {
     let text: String
@@ -621,13 +681,22 @@ private struct TypingDots: View {
     }
 }
 
+/// Whether the chat keeps the newest text in view.
+private enum Follow {
+    case following
+    /// The reader opened a section while following. The list holds still so its header stays put, and closing it follows again.
+    case reading
+    /// The reader dragged the list.
+    case away
+}
+
 /// Follows a growing reply until the reader drags the list, and resumes once they are back at the bottom.
 /// Following is explicit state rather than a size-change anchor, because an anchor only holds while the
 /// view is exactly at the bottom and one animated scroll that ends short loses it for the rest of the reply.
 /// iOS 17 lacks scroll geometry and phases, so ChatView falls back to a sentinel row and scrollTo.
 private struct FollowStream: ViewModifier {
     @Binding var atBottom: Bool
-    @Binding var following: Bool
+    @Binding var follow: Follow
     let scrollToBottom: () -> Void
 
     static var supported: Bool {
@@ -636,7 +705,11 @@ private struct FollowStream: ViewModifier {
 
     func body(content: Content) -> some View {
         if #available(iOS 18, macOS 15, *) {
+            // No anchor for size changes. It pinned the bottom even after the reader stopped following, so opening a
+            // section near the bottom pushed its header off the top.
             content
+                .defaultScrollAnchor(.bottom, for: .initialOffset)
+                .defaultScrollAnchor(.bottom, for: .alignment)
                 .onScrollGeometryChange(for: Bool.self) { geometry in
                     geometry.visibleRect.maxY >= geometry.contentSize.height - 60
                 } action: { _, isAtBottom in
@@ -645,17 +718,17 @@ private struct FollowStream: ViewModifier {
                 .onScrollGeometryChange(for: CGFloat.self) { geometry in
                     geometry.contentSize.height - geometry.containerSize.height
                 } action: { old, new in
-                    if following && new != old { scrollToBottom() }
+                    if follow == .following && new != old { scrollToBottom() }
                 }
                 .onScrollPhaseChange { _, phase in
                     switch phase {
-                    case .interacting: following = false
-                    case .idle: if atBottom { following = true }
+                    case .interacting: follow = .away
+                    case .idle: if atBottom, follow == .away { follow = .following }
                     default: break
                     }
                 }
         } else {
-            content
+            content.defaultScrollAnchor(.bottom)
         }
     }
 }
