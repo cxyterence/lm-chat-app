@@ -31,6 +31,7 @@ struct Markup: Sendable {
 enum Theme: String, CaseIterable, Identifiable {
     case system, light, dark
     case dracula, modernInk, dmg, shoko, vaporwave, nightRunner, miamiNights, olivia
+    case akariLight, akariDark
 
     /// The Appearance page shows each group under its own tab.
     enum Group: String, CaseIterable, Identifiable {
@@ -72,6 +73,10 @@ enum Theme: String, CaseIterable, Identifiable {
             Spec(name: "Dark", colorScheme: .dark, palette: .native)
         case .modernInk, .dmg, .shoko, .vaporwave, .nightRunner, .miamiNights, .olivia:
             Spec(name: MonkeytypeColors.presets[self]!.name, MonkeytypeColors.presets[self]!.colors)
+        case .akariLight:
+            Spec(name: "Akari Light", colorScheme: .light, palette: Palette(.dawn))
+        case .akariDark:
+            Spec(name: "Akari Dark", colorScheme: .dark, palette: Palette(.night))
         case .dracula:
             Spec(name: "Dracula", colorScheme: .dark, palette: Palette(
                 background: Color(hex: 0x282A36),
@@ -94,6 +99,30 @@ enum Theme: String, CaseIterable, Identifiable {
                     marker: Color(hex: 0xFF79C6))))
         }
     }
+}
+
+/// One variant of the Akari theme, by the roles its palette names (github.com/cappyzawa/akari-theme, MIT).
+/// Akari Light is its Dawn variant and Akari Dark is Night.
+struct AkariColors: Equatable {
+    var background: UInt32
+    var foreground: UInt32
+    var surface: UInt32
+    var raised: UInt32
+    var muted: UInt32
+    var accent: UInt32
+    var onAccent: UInt32
+    var success: UInt32
+    var error: UInt32
+    var link: UInt32
+    var heading: UInt32
+    var raw: UInt32
+
+    static let night = AkariColors(background: 0x25231F, foreground: 0xE6DED3, surface: 0x323333, raised: 0x363939,
+                                   muted: 0x9BABB9, accent: 0xE26A3B, onAccent: 0x25231F, success: 0x7FAF6A,
+                                   error: 0xD25046, link: 0xA7B5C1, heading: 0xE26A3B, raw: 0xA1C492)
+    static let dawn = AkariColors(background: 0xE4DED6, foreground: 0x1A1816, surface: 0xCFC4B6, raised: 0xD9D1C6,
+                                  muted: 0x222D38, accent: 0x8A4530, onAccent: 0xE4DED6, success: 0x3A5830,
+                                  error: 0x6A2828, link: 0x131A20, heading: 0x8A4530, raw: 0x20301A)
 }
 
 /// A Monkeytype theme's colours, from monkeytype's frontend/src/ts/constants/themes.ts.
@@ -161,6 +190,24 @@ struct MonkeytypeColors: Equatable {
 }
 
 extension Palette {
+    /// Akari keeps one warm colour as the only accent, so bold and italic stay the text colour as its editor themes do.
+    init(_ colors: AkariColors) {
+        let text = Color(hex: colors.foreground), muted = Color(hex: colors.muted), accent = Color(hex: colors.accent)
+        self.init(background: Color(hex: colors.background),
+                  groupedBackground: Color(hex: colors.background),
+                  surface: Color(hex: colors.raised),
+                  fill: Color(hex: colors.surface),
+                  text: text,
+                  secondaryText: muted,
+                  accent: accent,
+                  onAccent: Color(hex: colors.onAccent),
+                  success: Color(hex: colors.success),
+                  danger: Color(hex: colors.error),
+                  markup: Markup(heading: Color(hex: colors.heading), strong: text, emphasis: text,
+                                 code: Color(hex: colors.raw), link: Color(hex: colors.link),
+                                 quote: muted, marker: accent))
+    }
+
     init(_ colors: MonkeytypeColors) {
         let text = Color(hex: colors.text), secondaryText = Color(hex: colors.secondaryText)
         let accentText = Color(hex: colors.accentText)
