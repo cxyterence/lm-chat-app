@@ -31,6 +31,10 @@ public enum UISnapshot {
 
             try write(RootView(store: store), size: chatSize, appearance: appearance,
                       to: directory.appendingPathComponent("\(theme.rawValue)-chat.png"))
+            let interruptedFile = scratch.appendingPathComponent("interrupted.json")
+            try ConversationStore.save([interruptedConversation], to: interruptedFile)
+            try write(RootView(store: ChatStore(defaults: defaults, fileURL: interruptedFile, secrets: .memory())), size: chatSize,
+                      appearance: appearance, to: directory.appendingPathComponent("\(theme.rawValue)-interrupted.png"))
             try await renderDevTools(theme: theme, appearance: appearance, defaults: defaults, scratch: scratch, to: directory)
             let pages: [(String, SettingsPage?)] = [("root", nil)] + SettingsPage.allCases.map { ($0.rawValue, $0) }
             for (name, page) in pages {
@@ -134,6 +138,19 @@ public enum UISnapshot {
         .theme(theme)
         try write(noModel, size: CGSize(width: 390, height: 900), appearance: appearance,
                   to: directory.appendingPathComponent("\(theme.rawValue)-devtools-compare-no-model.png"))
+    }
+
+    /// A reply saved while it streamed and found again after the app was closed.
+    private static var interruptedConversation: Conversation {
+        Conversation(
+            title: "Explain tail recursion",
+            model: "sample-model",
+            messages: [
+                ChatMessage(role: .user, content: "Explain tail recursion in one paragraph."),
+                ChatMessage(role: .assistant,
+                            content: "A call is a **tail call** when it is the last thing a function does, so the compiler can reuse",
+                            interrupted: true),
+            ])
     }
 
     private static var sampleConversation: Conversation {

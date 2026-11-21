@@ -264,7 +264,8 @@ private struct AssistantBubble: View {
             } else if content.isEmpty && isStreaming && reasoning.isEmpty && toolCalls.isEmpty {
                 TypingDots().transition(.opacity)
             }
-            if !message.adaptations.isEmpty { Notes(adaptations: message.adaptations) }
+            let notes = message.adaptations.map(\.note) + (message.interrupted ? ["Interrupted. The app closed before the reply finished."] : [])
+            if !notes.isEmpty { Notes(notes: notes) }
             if !isStreaming, let stats, let inspect { StatsLine(text: stats, action: inspect) }
         }
         .contextMenu {
@@ -276,15 +277,15 @@ private struct AssistantBubble: View {
 
 /// What the app changed about the request behind a reply, one quiet line each.
 private struct Notes: View {
-    let adaptations: [Adaptation]
+    let notes: [String]
     @Environment(\.palette) private var palette
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            ForEach(Array(adaptations.enumerated()), id: \.offset) { _, adaptation in
+            ForEach(Array(notes.enumerated()), id: \.offset) { _, note in
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
                     Image(systemName: "info.circle").accessibilityHidden(true)
-                    Text(adaptation.note)
+                    Text(note)
                 }
                 .font(.caption)
                 .foregroundStyle(palette.secondaryText)

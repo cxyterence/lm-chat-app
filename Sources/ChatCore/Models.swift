@@ -20,6 +20,8 @@ public struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
     public var toolCalls: [ToolCall]
     /// What the app changed about the request that produced this message.
     public var adaptations: [Adaptation]
+    /// Saved while the reply was still streaming, and never finished: the app was closed first.
+    public var interrupted: Bool
     public var createdAt: Date
 
     public init(
@@ -31,6 +33,7 @@ public struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
         search: WebSearch? = nil,
         toolCalls: [ToolCall] = [],
         adaptations: [Adaptation] = [],
+        interrupted: Bool = false,
         createdAt: Date = Date()
     ) {
         self.id = id
@@ -41,6 +44,7 @@ public struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
         self.search = search
         self.toolCalls = toolCalls
         self.adaptations = adaptations
+        self.interrupted = interrupted
         self.createdAt = createdAt
     }
 
@@ -54,6 +58,7 @@ public struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
         search = try c.decodeIfPresent(WebSearch.self, forKey: .search)
         toolCalls = try c.decodeIfPresent([ToolCall].self, forKey: .toolCalls) ?? []
         adaptations = try c.decodeIfPresent([Adaptation].self, forKey: .adaptations) ?? []
+        interrupted = try c.decodeIfPresent(Bool.self, forKey: .interrupted) ?? false
         createdAt = try c.decode(Date.self, forKey: .createdAt)
     }
 }

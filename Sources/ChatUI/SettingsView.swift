@@ -2,7 +2,7 @@ import ChatCore
 import SwiftUI
 
 enum SettingsPage: String, CaseIterable, Identifiable {
-    case connections, apiKeys, mcp, imageTool, webPages, appearance
+    case connections, apiKeys, mcp, imageTool, webPages, background, appearance
 
     var id: Self { self }
     var title: String {
@@ -11,6 +11,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         case .mcp: "MCP Connections"
         case .imageTool: "Image Generation"
         case .webPages: "Web Pages"
+        case .background: "Background Replies"
         default: rawValue.capitalized
         }
     }
@@ -21,6 +22,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         case .mcp: "point.3.connected.trianglepath.dotted"
         case .imageTool: "photo"
         case .webPages: "link"
+        case .background: "arrow.down.right.and.arrow.up.left"
         case .appearance: "paintpalette"
         }
     }
@@ -81,6 +83,7 @@ struct SettingsView: View {
                     case .mcp: MCPSettings(store: store) { path.append($0) }
                     case .imageTool: ImageToolSettings(store: store)
                     case .webPages: WebPagesSettings(store: store)
+                    case .background: BackgroundRepliesSettings(store: store)
                     case .appearance: AppearanceSettings(store: store)
                     }
                 }
@@ -116,6 +119,7 @@ struct SettingsView: View {
             APIService.allCases.filter { !store.serviceKey($0).isEmpty }.map(\.name).joined(separator: ", ")
         case .imageTool: store.imageTool?.model ?? ""
         case .webPages: store.fetchesPages ? "On" : "Off"
+        case .background: store.continuesLongReplies ? "On" : "Off"
         case .appearance: store.theme.name
         }
     }
@@ -482,6 +486,26 @@ struct WebPagesSettings: View {
                 Toggle("Fetch web pages", isOn: Binding(get: { store.fetchesPages }, set: store.setFetchesPages))
             } footer: {
                 Text("A chat model that supports tool calling can read a link you paste. Pages are fetched from this device, and the model sees their text. It asks before reading an address you didn't give it.")
+            }
+            .listRowBackground(palette.surface)
+        }
+        .formStyle(.grouped)
+        .foregroundStyle(palette.text)
+        .scrollContentBackground(.hidden)
+    }
+}
+
+/// Lets a reply ask iOS for a continued processing task when the app leaves the screen.
+struct BackgroundRepliesSettings: View {
+    let store: ChatStore
+    @Environment(\.palette) private var palette
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Continue long replies", isOn: Binding(get: { store.continuesLongReplies }, set: store.setContinuesLongReplies))
+            } footer: {
+                Text("A reply keeps going for about 30 seconds after you leave the app, and what has arrived is always saved. Turn this on to ask iOS for more time, so a longer reply can finish. iOS shows the reply's progress while it runs and lets you stop it. Needs iOS 26 or later. Experimental.")
             }
             .listRowBackground(palette.surface)
         }

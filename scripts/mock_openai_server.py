@@ -9,6 +9,9 @@ Models:
 A prompt starting with "/long" streams a long Markdown reply in irregular bursts, like a real network.
 On mock-reasoning, "/long" streams a long bursty reasoning section first.
 On mock-reasoning, "/huge" streams ~20k characters of reasoning then ~6k of Markdown, fast, as a load test.
+"/slow N" streams "w1 w2 ... END" over N seconds (default 25), four words a second, so
+the app's saves can be timed against it. The log (stdout) says how the stream ended and whether the client closed the connection.
+"/slow N drop M" resets the connection M seconds in, as a lost network does. `kill -USR1 <pid>` does the same to a "/slow" stream now running.
 "/spans" streams inline formatting slowly, three characters at a time, to show half-finished spans.
 Image parts are acknowledged with their sizes, except by mock-think, which rejects them like a text-only model.
 mock-image is listed the way SGLang lists a diffusion model and answers /v1/images/generations with a PNG.
@@ -25,10 +28,13 @@ from email.parser import BytesParser
 from email.policy import HTTP
 from itertools import takewhile
 import re
+import signal
+import socket
 import json
 import os
 import random
 import struct
+import threading
 import time
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -131,6 +137,13 @@ That is the whole idea. Smaller blocks cost a little more metadata but track the
 SPANS_REPLY = """Use **bold claims** sparingly, *italic asides* when useful, and `inline_code()` for names.
 Read [the NVFP4 guide](https://example.com/nvfp4) and ~~old advice~~ the **newest `kernel` notes**.
 """
+
+
+drop_now = threading.Event()
+
+
+def log(message):
+    print(f"[{time.time():.2f}] {message}", flush=True)
 
 
 def bursty(text, seed=7):
@@ -330,6 +343,8 @@ class Handler(BaseHTTPRequestHandler):
                for m in body.get("messages", [])):
             words = last_user.split("\n\n", 1)[-1].split()[:4]
             reply = f'Title: "{" ".join(words).title()}."'
+        if last_user.strip().startswith("/slow") and body.get("stream") and not reply.startswith("Title:"):
+            return self.slow_stream(last_user)
         events = script(model, reply)
         delays = [0.03] * len(events)
         if last_user.strip().startswith("/huge"):
@@ -359,6 +374,55 @@ class Handler(BaseHTTPRequestHandler):
 
         self.stream(events, delays, usage=usage_for(body, events))
 
+    def slow_stream(self, prompt):
+        """Four words a second. A client that has read the whole reply closes the connection, so the log says whether
+        that happened."""
+        parts = prompt.split()
+        seconds = float(parts[1]) if len(parts) > 1 else 25.0
+        drop_after = float(parts[3]) if len(parts) > 3 and parts[2] == "drop" else None
+        drop_now.clear()
+        words = [f"w{i} " for i in range(1, int(seconds * 4) + 1)] + ["END"]
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        if drop_after is not None:
+            # With no length the client reads until the connection closes, so a reset looks like the end of the reply.
+            self.send_header("Content-Length", "10000000")
+        self.end_headers()
+        started = time.monotonic()
+        log(f"slow stream start: {len(words)} words over {seconds:.0f}s")
+        try:
+            for index, word in enumerate(words, 1):
+                before = time.monotonic()
+                if drop_now.is_set() or (drop_after is not None and before - started >= drop_after):
+                    self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                    self.connection.close()
+                    log(f"stream dropped: connection reset after {index - 1}/{len(words)} words (stream t={before - started:.1f}s)")
+                    return
+                self.wfile.write(f"data: {json.dumps(chunk({'content': word}))}\n\n".encode())
+                self.wfile.flush()
+                if index % 20 == 0:
+                    log(f"sent {index}/{len(words)} (stream t={time.monotonic() - started:.1f}s)")
+                time.sleep(max(0, 0.25 - (time.monotonic() - before)))
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+            log(f"stream written: the last word and [DONE] are on the socket (t={time.monotonic() - started:.1f}s)")
+            self.connection.shutdown(socket.SHUT_WR)
+            self.connection.settimeout(10)
+            closed = self.wait_for_close()
+            log(f"stream complete: all {len(words)} words written, {closed} (t={time.monotonic() - started:.1f}s)")
+        except OSError as error:
+            log(f"stream broken: connection lost after {index - 1}/{len(words)} words (stream t={time.monotonic() - started:.1f}s): {error!r}")
+
+    def wait_for_close(self):
+        try:
+            while self.connection.recv(4096):
+                pass
+        except ConnectionResetError:
+            return "the client reset the connection"
+        except socket.timeout:
+            return "the client had not closed the connection after 10s"
+        return "the client closed the connection"
+
     def stream(self, events, delays, finish="stop", usage=None):
         if finish:
             events, delays = events + [chunk({}, finish)], delays + [0]
@@ -382,5 +446,6 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8099)
     args = parser.parse_args()
+    signal.signal(signal.SIGUSR1, lambda *_: drop_now.set())
     print(f"mock OpenAI server on http://{args.host}:{args.port}/v1", flush=True)
     ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()

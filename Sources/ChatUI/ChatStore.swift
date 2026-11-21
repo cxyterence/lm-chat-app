@@ -89,10 +89,20 @@ public final class ChatStore {
         static let mcpServers = "mcpServers"
         static let imageTool = "imageTool"
         static let fetchPages = "fetchPages"
+        static let continueLongReplies = "continueLongReplies"
     }
 
     /// Rounds of tool use one reply may take before it must answer with what it has.
     static let maxToolRounds = 10
+
+    /// The least time between two saves of a reply as it streams.
+    static let partialSaveInterval: TimeInterval = 2
+
+    static let backgroundFailure = "The reply stopped while the app was in the background."
+    /// How long after the app comes back a dropped connection is still taken as the background's doing, since one that
+    /// died while the app was suspended only shows up once it runs again.
+    static let backgroundGrace: TimeInterval = 5
+    static let systemStopped = "The system stopped the reply in the background."
 
     /// Settings from before connections existed, read once to build the first connection.
     private enum LegacyKeys {
@@ -131,11 +141,32 @@ public final class ChatStore {
     private var savedImageTool: ImageTool?
     /// Whether `fetch_url` is offered with every reply. Off until the user turns it on.
     private(set) var fetchesPages: Bool
+    /// Whether a reply may ask iOS for a continued processing task. Off until someone turns it on, since it has only
+    /// ever run where the system refuses such tasks.
+    private(set) var continuesLongReplies: Bool
     /// The tool call waiting for the user to allow or decline it.
     private(set) var awaitingApproval: String?
 
     @ObservationIgnored let defaults: UserDefaults
     @ObservationIgnored private let secrets: Secrets
+    @ObservationIgnored private let background: BackgroundTime
+    @ObservationIgnored private let now: () -> Date
+    /// Ends the extra time iOS gave. Held only while a reply streams and the app is in the background.
+    @ObservationIgnored private var endBackgroundTime: (() -> Void)?
+    /// The continued processing task covering the reply that is streaming, if the system gave one.
+    @ObservationIgnored private var cover: ReplyCover?
+    @ObservationIgnored private var lastPartialSave = Date.distantPast
+    /// Every write of the chat file goes through here, in order, so a slow write of a reply in progress can't land
+    /// after the save that follows it.
+    @ObservationIgnored private let writer = DispatchQueue(label: "ChatStore.writer")
+    /// Whether the app left the screen while the current reply streamed.
+    @ObservationIgnored private var leftWhileStreaming = false
+    @ObservationIgnored private var inBackground = false
+    @ObservationIgnored private var lastBecameActive = Date.distantPast
+    /// Whether the system ended the continued task, which stops the reply.
+    @ObservationIgnored private var stoppedBySystem = false
+    /// Characters of the rounds of this reply that are already finished.
+    @ObservationIgnored private var finishedRoundCharacters = 0
     @ObservationIgnored private var effortCheck: Task<Void, Never>?
     @ObservationIgnored private let fileURL: URL
     @ObservationIgnored let images: ImageStore
@@ -152,16 +183,20 @@ public final class ChatStore {
     @ObservationIgnored private var withoutUsage: Set<String> = []
 
     public convenience init() {
-        self.init(defaults: .standard, fileURL: ChatStore.defaultFileURL, secrets: .keychain)
+        self.init(defaults: .standard, fileURL: ChatStore.defaultFileURL, secrets: .keychain, background: .system)
     }
 
-    init(defaults: UserDefaults, fileURL: URL, secrets: Secrets, session: URLSession = .shared, pages: PageFetcher = PageFetcher()) {
+    init(defaults: UserDefaults, fileURL: URL, secrets: Secrets, session: URLSession = .shared, pages: PageFetcher = PageFetcher(),
+         background: BackgroundTime = .none, now: @escaping () -> Date = Date.init) {
         self.defaults = defaults
         self.fileURL = fileURL
         self.secrets = secrets
+        self.background = background
+        self.now = now
         self.session = session
         self.pages = pages
         fetchesPages = defaults.bool(forKey: Keys.fetchPages)
+        continuesLongReplies = defaults.bool(forKey: Keys.continueLongReplies)
         images = ImageStore(directory: fileURL.deletingLastPathComponent().appendingPathComponent("images"))
         preferredEffort = defaults.string(forKey: Keys.reasoningEffort).flatMap(ReasoningEffort.init(rawValue:))
         theme = defaults.string(forKey: Keys.theme).flatMap(Theme.init(rawValue:)) ?? .system
@@ -228,6 +263,11 @@ public final class ChatStore {
     func setFetchesPages(_ on: Bool) {
         fetchesPages = on
         defaults.set(on, forKey: Keys.fetchPages)
+    }
+
+    func setContinuesLongReplies(_ on: Bool) {
+        continuesLongReplies = on
+        defaults.set(on, forKey: Keys.continueLongReplies)
     }
 
     /// The models a saved connection serves, listed with that connection's own key.
@@ -604,6 +644,56 @@ public final class ChatStore {
         if case .streaming(_, let task) = generation { task.cancel() }
     }
 
+    /// The app is about to leave the screen, or may only be pulling down Control Center. A continued processing task
+    /// shows the person a system banner, so a reply asks for one only here and not each time one is sent.
+    func appWillLeave() {
+        guard continuesLongReplies, cover == nil, case .streaming(let id, _) = generation,
+              conversations.first(where: { $0.id == id })?.messages.last?.role == .assistant
+        else { return }
+        cover = background.cover { [weak self] in self?.systemEndedReply() }
+        cover?.update(charactersReceived)
+    }
+
+    private func systemEndedReply() {
+        guard case .streaming = generation else { return }
+        stoppedBySystem = true
+        stop()
+    }
+
+    /// Everything the reply has written, tool rounds included, so the task's progress only goes forward.
+    private var charactersReceived: Int { finishedRoundCharacters + (liveReply.map { $0.content.count + $0.reasoning.count } ?? 0) }
+
+    /// Saves what has arrived and asks iOS for time to keep the reply coming. The grant is asked for even when a task
+    /// covers the reply, since a task the system queues may not start for a while.
+    func appMovedToBackground() {
+        inBackground = true
+        guard isBusy else { return }
+        leftWhileStreaming = true
+        persist()
+        guard endBackgroundTime == nil else { return }
+        endBackgroundTime = background.begin { [weak self] in
+            self?.persist()
+            self?.releaseBackgroundTime()
+        }
+    }
+
+    func appBecameActive() {
+        inBackground = false
+        lastBecameActive = now()
+        releaseBackgroundTime()
+        releaseCover(success: true)
+    }
+
+    private func releaseBackgroundTime() {
+        endBackgroundTime?()
+        endBackgroundTime = nil
+    }
+
+    private func releaseCover(success: Bool) {
+        cover?.finish(success)
+        cover = nil
+    }
+
     func retry() {
         guard case .failed(let id, _, let request) = generation,
               let index = conversations.firstIndex(where: { $0.id == id })
@@ -789,6 +879,9 @@ public final class ChatStore {
     private func startStreaming(conversationID id: UUID, request: Request = .reply) {
         guard let config, conversations.contains(where: { $0.id == id }) else { return }
         releaseFailedReply()
+        leftWhileStreaming = false
+        stoppedBySystem = false
+        finishedRoundCharacters = 0
         let first = beginOutput(in: id, role: request == .reply ? .assistant : .summary)
         let task = Task { await generate(conversationID: id, request: request, first: first, config: config) }
         generation = .streaming(conversationID: id, task: task)
@@ -833,13 +926,22 @@ public final class ChatStore {
                 await runTools(offer, for: current, in: id)
                 guard !Task.isCancelled else { break }
                 commitLiveReply(to: current, in: id)
+                finishedRoundCharacters = charactersReceived
                 current = beginOutput(in: id, role: .assistant)
             }
             if Task.isCancelled { outcome = .cancelled }
         } catch {
-            outcome = Task.isCancelled ? .cancelled : .failed(error.localizedDescription)
+            // A dropped connection after the app left the screen is iOS's doing, not the server's.
+            let message = blamesBackground(error) ? Self.backgroundFailure : error.localizedDescription
+            outcome = Task.isCancelled ? .cancelled : .failed(message)
         }
+        if stoppedBySystem, outcome == .cancelled { outcome = .failed(Self.systemStopped) }
         finish(conversationID: id, messageID: current, request: request, outcome: outcome)
+    }
+
+    private func blamesBackground(_ error: Error) -> Bool {
+        leftWhileStreaming && error is URLError
+            && (inBackground || now().timeIntervalSince(lastBecameActive) <= Self.backgroundGrace)
     }
 
     private func beginOutput(in id: UUID, role: Role) -> UUID {
@@ -868,8 +970,12 @@ public final class ChatStore {
                 }
                 guard let reply = liveReply, reply.messageID == messageID else { continue }
                 switch event {
-                case .content(let text): reply.content += text
-                case .reasoning(let text): reply.reasoning += text
+                case .content(let text):
+                    reply.content += text
+                    savePartialReply()
+                case .reasoning(let text):
+                    reply.reasoning += text
+                    savePartialReply()
                 case .toolCall(let delta):
                     calls.add(delta)
                     reply.toolCalls = calls.calls.map { call in
@@ -1038,20 +1144,62 @@ public final class ChatStore {
             conversations[c].updatedAt = Date()
         }
         if liveReply?.messageID == messageID { liveReply = nil }
+        persist()
+        releaseBackgroundTime()
+        if case .failed = outcome { releaseCover(success: false) } else { releaseCover(success: true) }
         if case .failed(let message) = outcome {
             generation = .failed(conversationID: id, message: message, request: request)
         } else {
             generation = .idle
         }
-        persist()
     }
 
-    private func persist() {
-        do {
-            try ConversationStore.save(conversations, to: fileURL)
-            persistenceError = nil
-        } catch {
-            persistenceError = "Couldn't save chats: \(error.localizedDescription)"
+    /// Saves the reply so far, at most once per `partialSaveInterval`.
+    private func savePartialReply() {
+        let time = now()
+        guard time.timeIntervalSince(lastPartialSave) >= Self.partialSaveInterval else { return }
+        lastPartialSave = time
+        persist(inBackground: true)
+        cover?.update(charactersReceived)
+    }
+
+    /// Returns once every save asked for so far is on disk.
+    func finishPendingSaves() { writer.sync {} }
+
+    /// What goes to disk. A reply still streaming is saved as it stands and marked interrupted, so a chat found
+    /// like that at launch shows it. In memory the reply stays in `liveReply` until it finishes.
+    private func conversationsToSave() -> [Conversation] {
+        var saved = conversations
+        guard let live = liveReply else { return saved }
+        for c in saved.indices {
+            guard let m = saved[c].messages.firstIndex(where: { $0.id == live.messageID }) else { continue }
+            // A summary is all or nothing, so one still being written is left out and the saved chat is the chat as it was.
+            if saved[c].messages[m].role != .assistant || (live.content.isEmpty && live.reasoning.isEmpty && live.toolCalls.isEmpty) {
+                saved[c].messages.remove(at: m)
+            } else {
+                saved[c].messages[m].content = live.content
+                saved[c].messages[m].reasoning = live.reasoning
+                saved[c].messages[m].toolCalls = live.toolCalls
+                saved[c].messages[m].interrupted = true
+            }
+            break
+        }
+        return saved
+    }
+
+    /// Encoding a long history takes tens of milliseconds, so a save that streaming asks for happens off the main thread.
+    private func persist(inBackground: Bool = false) {
+        let saved = conversationsToSave(), url = fileURL
+        if inBackground {
+            writer.async { [weak self] in
+                guard case .failure(let error) = Result(catching: { try ConversationStore.save(saved, to: url) }) else { return }
+                Task { @MainActor in self?.persistenceError = "Couldn't save chats: \(error.localizedDescription)" }
+            }
+            return
+        }
+        switch writer.sync(execute: { Result(catching: { try ConversationStore.save(saved, to: url) }) }) {
+        case .success: persistenceError = nil
+        case .failure(let error): persistenceError = "Couldn't save chats: \(error.localizedDescription)"
         }
     }
 }
