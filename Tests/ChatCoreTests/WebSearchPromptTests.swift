@@ -12,4 +12,12 @@ struct WebSearchPromptTests {
         #expect(SlashCommand.suggestions(for: "/w") == [.webSearch])
         #expect(SlashCommand.webSearch.needsArgument && !SlashCommand.compact.needsArgument)
     }
+
+    @Test func toolArgumentsNeedANonBlankQuery() {
+        #expect(WebSearch.query(in: #"{"query": "  swift 6 "}"#) == "swift 6")
+        #expect(WebSearch.query(in: #"{"query": "  "}"#) == nil)
+        #expect(WebSearch.query(in: #"{"q": "swift"}"#) == nil)
+        #expect(WebSearch.query(in: "not json") == nil)
+        #expect(WebSearch.toolResult([]) == "The search found nothing.")
+    }
 }

@@ -28,21 +28,59 @@ public struct WebSearch: Codable, Equatable, Sendable {
         guard let results, !results.isEmpty else {
             return "A web search for \"\(query)\" found nothing. Say so, then answer from what you know: \(query)"
         }
-        let sources = results.enumerated().map { index, result in
-            "[\(index + 1)] \(result.title)\n\(result.link.absoluteString)\n\(result.snippet)"
-        }.joined(separator: "\n\n")
         return """
-            Answer using these web search results, retrieved \(Self.today). Cite sources inline as Markdown \
-            links numbered like the results, for example [1](https://example.com). If the results don't \
+            Answer using these web search results, retrieved \(Self.today). \(Self.citing) If the results don't \
             answer it, say so.
 
-            \(sources)
+            \(Self.numbered(results))
 
             Question: \(query)
             """
     }
 
+    private static let citing = "Cite sources inline as Markdown links numbered like the results, for example [1](https://example.com)."
+
     private static var today: String { Date().formatted(.iso8601.year().month().day()) }
+
+    private static func numbered(_ results: [Result]) -> String {
+        results.enumerated().map { index, result in
+            "[\(index + 1)] \(result.title)\n\(result.link.absoluteString)\n\(result.snippet)"
+        }.joined(separator: "\n\n")
+    }
+}
+
+extension WebSearch {
+    public static let toolName = "web_search"
+
+    /// The tool as the model sees it. `query(in:)` reads what it sends back.
+    public static let toolSpec = ToolSpec(
+        name: toolName,
+        description: """
+            Searches Google and returns the top results, each with a title, address and snippet. Call it when the \
+            answer depends on recent events, current facts, or anything you aren't sure of. Read a result's page \
+            with fetch_url when the snippet isn't enough and that tool is offered.
+            """,
+        parameters: try! JSONDecoder().decode(JSONValue.self, from: Data("""
+            {"type": "object",
+             "properties": {
+               "query": {"type": "string", "description": "What to search for, written as you would type it into Google."}
+             },
+             "required": ["query"]}
+            """.utf8))
+    )
+
+    /// The non-blank `query` in a call's arguments.
+    public static func query(in arguments: String) -> String? {
+        let query = (try? JSONDecoder().decode(JSONValue.self, from: Data(arguments.utf8)))?["query"]?.string?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return query?.isEmpty == false ? query : nil
+    }
+
+    /// What the model reads back from `web_search`.
+    public static func toolResult(_ results: [Result]) -> String {
+        guard !results.isEmpty else { return "The search found nothing." }
+        return "Results retrieved \(today). \(citing)\n\n\(numbered(results))"
+    }
 }
 
 /// Google results through serper.dev.
@@ -93,7 +131,7 @@ public struct SearchError: Error, Equatable, LocalizedError {
 
     public var errorDescription: String? {
         switch status {
-        case 401, 403: "Serper rejected the API key. Check it in Settings › API Keys."
+        case 401, 403: "Serper rejected the API key. Check it in Settings › Web Search."
         default: "Web search failed (HTTP \(status)): \(message)"
         }
     }

@@ -78,4 +78,78 @@ struct WebSearchTests {
         store.run(.webSearch, argument: "")
         #expect(store.selectedConversation?.messages.isEmpty != false)
     }
+
+    /// A chat model that calls `web_search` for "swift 6" when it is offered the tool, and answers the result by repeating it.
+    private func searchingModel(serper: @escaping @Sendable (String) -> (Int, String)
+                                    = { query in (200, serperPage(["about " + query])) }) -> StubServer {
+        StubServer(search: serper) { body in
+            if lastRole(body) == "tool" { return (200, sse(["done: ", transcript(body).last?.text ?? ""])) }
+            guard offeredTools(body).contains("web_search") else { return (200, sse(["no tool"])) }
+            return (200, toolCallReply("web_search", arguments: #"{"query": "swift 6"}"#))
+        }
+    }
+
+    @Test func theToolIsOfferedOnlyWhileTheToggleIsOnAndAKeyIsSavedAndTheChoiceIsKept() async throws {
+        let server = searchingModel()
+        let rig = Rig(server: server)
+        defer { rig.cleanup() }
+        #expect(rig.store.searchesWeb == false)
+
+        rig.store.setSearchesWeb(true)
+        rig.store.send("no key yet")
+        await untilIdle(rig.store)
+        #expect(offeredTools(try #require(server.chats.last)) == [], "nothing runs the tool without a key")
+
+        useSerper(rig.store, at: server)
+        #expect(rig.reopened().searchesWeb)
+        rig.store.send("now with a key")
+        await untilIdle(rig.store)
+        #expect(server.chats.contains { offeredTools($0) == ["web_search"] })
+
+        rig.store.setSearchesWeb(false)
+        #expect(rig.reopened().searchesWeb == false)
+        let asked = server.chats.count
+        rig.store.send("off again")
+        await untilIdle(rig.store)
+        #expect(offeredTools(try #require(server.chats.last)) == [])
+        #expect(server.chats.count == asked + 1)
+    }
+
+    @Test func theModelSearchesWithItsOwnQueryAndReadsNumberedResults() async throws {
+        let server = searchingModel()
+        let (store, cleanup) = makeStore(server: server)
+        defer { cleanup() }
+        useSerper(store, at: server)
+        store.setSearchesWeb(true)
+
+        store.send("what's new in swift?")
+        await untilIdle(store)
+
+        #expect(server.searches == ["swift 6"])
+        let messages = try #require(store.selectedConversation?.messages)
+        #expect(messages.map(\.role) == [.user, .assistant, .assistant])
+        #expect(messages[0].search == nil, "the question itself is sent as typed")
+        let call = try #require(messages[1].toolCalls.first)
+        #expect(call.name == "web_search" && call.server == "swift 6", "the row shows the query")
+        #expect(call.result?.isError == false)
+        #expect(call.result?.text.contains("[1] about swift 6\nhttps://example.com/0\nAbout about swift 6.") == true)
+        #expect(call.result?.text.contains("Cite sources inline") == true)
+        #expect(messages[2].content.hasPrefix("done: Results retrieved"))
+    }
+
+    @Test func aFailedSearchIsAnErrorTheModelReads() async throws {
+        let server = searchingModel(serper: { _ in (403, #"{"message":"Unauthorized."}"#) })
+        let (store, cleanup) = makeStore(server: server)
+        defer { cleanup() }
+        useSerper(store, at: server)
+        store.setSearchesWeb(true)
+
+        store.send("what's new in swift?")
+        await untilIdle(store)
+
+        let call = try #require(store.selectedConversation?.messages[1].toolCalls.first)
+        #expect(call.result?.isError == true)
+        #expect(call.result?.text.contains("rejected the API key") == true)
+        #expect(store.selectedConversation?.messages.last?.content.contains("rejected the API key") == true)
+    }
 }

@@ -84,8 +84,9 @@ public final class ChatStore {
         static let activeConnection = "activeConnection"
         static let reasoningEffort = "reasoningEffort"
         static let theme = "theme"
-        /// Points `/web-search` somewhere other than serper.dev, for testing against a local mock.
+        /// Points web search somewhere other than serper.dev, for testing against a local mock.
         static let serperURL = "serperURL"
+        static let searchWeb = "searchWeb"
         static let mcpServers = "mcpServers"
         static let imageTool = "imageTool"
         static let fetchPages = "fetchPages"
@@ -141,6 +142,8 @@ public final class ChatStore {
     private var savedImageTool: ImageTool?
     /// Whether `fetch_url` is offered with every reply. Off until the user turns it on.
     private(set) var fetchesPages: Bool
+    /// Whether `web_search` is offered with every reply that has a Serper key to run it. Off until the user turns it on.
+    private(set) var searchesWeb: Bool
     /// Whether a reply may ask iOS for a continued processing task. Off until someone turns it on, since it has only
     /// ever run where the system refuses such tasks.
     private(set) var continuesLongReplies: Bool
@@ -196,6 +199,7 @@ public final class ChatStore {
         self.session = session
         self.pages = pages
         fetchesPages = defaults.bool(forKey: Keys.fetchPages)
+        searchesWeb = defaults.bool(forKey: Keys.searchWeb)
         continuesLongReplies = defaults.bool(forKey: Keys.continueLongReplies)
         images = ImageStore(directory: fileURL.deletingLastPathComponent().appendingPathComponent("images"))
         preferredEffort = defaults.string(forKey: Keys.reasoningEffort).flatMap(ReasoningEffort.init(rawValue:))
@@ -263,6 +267,11 @@ public final class ChatStore {
     func setFetchesPages(_ on: Bool) {
         fetchesPages = on
         defaults.set(on, forKey: Keys.fetchPages)
+    }
+
+    func setSearchesWeb(_ on: Bool) {
+        searchesWeb = on
+        defaults.set(on, forKey: Keys.searchWeb)
     }
 
     func setContinuesLongReplies(_ on: Bool) {
@@ -455,6 +464,7 @@ public final class ChatStore {
             tools.append(.image(connection: connection.name, config: config, model: tool.model))
         }
         if fetchesPages { tools.append(.fetch) }
+        if searchesWeb, !serviceKey(.serper).isEmpty { tools.append(.search(serper)) }
         return tools
     }
 
@@ -831,7 +841,7 @@ public final class ChatStore {
         case .compact:
             Compaction.hasNewMessages(selectedConversation?.messages ?? []) ? nil : "Nothing to compact yet"
         case .webSearch:
-            serviceKey(.serper).isEmpty ? "Add a Serper key in Settings › API Keys" : nil
+            serviceKey(.serper).isEmpty ? "Add a Serper key in Settings › Web Search" : nil
         }
     }
 
@@ -855,14 +865,17 @@ public final class ChatStore {
         else { return }
         let messageID = conversations[c].messages[m].id
         liveReply?.status = "Searching the web…"
-        let baseURL = defaults.string(forKey: Keys.serperURL).flatMap(URL.init(string:)) ?? SerperClient.defaultBaseURL
-        let results = try await SerperClient(apiKey: serviceKey(.serper), baseURL: baseURL, session: session)
-            .search(search.query)
+        let results = try await serper.search(search.query)
         liveReply?.status = nil
         guard let c = conversations.firstIndex(where: { $0.id == id }),
               let m = conversations[c].messages.firstIndex(where: { $0.id == messageID })
         else { return }
         conversations[c].messages[m].search?.results = results
+    }
+
+    private var serper: SerperClient {
+        let baseURL = defaults.string(forKey: Keys.serperURL).flatMap(URL.init(string:)) ?? SerperClient.defaultBaseURL
+        return SerperClient(apiKey: serviceKey(.serper), baseURL: baseURL, session: session)
     }
 
     func dismissFailure() {
@@ -1027,6 +1040,9 @@ public final class ChatStore {
                 } else {
                     result = await fetchPage(call, for: messageID)
                 }
+            case .search(let serper)?:
+                // It sends only the query, and only to Serper, so it doesn't ask.
+                result = await searchWeb(call, with: serper)
             case .mcp(let tool)?:
                 if !tool.tool.readOnly, !(await approve(call.id)) {
                     guard !Task.isCancelled else { return }
@@ -1058,6 +1074,21 @@ public final class ChatStore {
             return .init(text: invalid.message, isError: true)
         } catch {
             return .init(text: "The page couldn't be fetched: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Runs the query `web_search` was called with. A failure comes back as an error result for the model to relay.
+    private func searchWeb(_ call: ToolCall, with serper: SerperClient) async -> ToolCall.Result {
+        guard let query = WebSearch.query(in: call.arguments) else {
+            return .init(text: "The arguments must be a JSON object with a query, such as {\"query\": \"swift 6 release date\"}.",
+                         isError: true)
+        }
+        liveReply?.status = "Searching the web…"
+        defer { liveReply?.status = nil }
+        do {
+            return .init(text: WebSearch.toolResult(try await serper.search(query)))
+        } catch {
+            return .init(text: "The search failed: \(error.localizedDescription)", isError: true)
         }
     }
 

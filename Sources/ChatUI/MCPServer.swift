@@ -36,7 +36,7 @@ struct OfferedTool {
     /// OpenAI allows letters, digits, `_` and `-`, up to 64 characters. Clashes take the server's name as a prefix.
     /// The app's own tools' names are always taken, so no server's tool can answer to them.
     static func offer(_ servers: [(MCPServer, MCPClient, [MCPTool])]) -> [OfferedTool] {
-        var taken: Set = [ImageRequest.toolName, FetchRequest.toolName]
+        var taken: Set = [ImageRequest.toolName, FetchRequest.toolName, WebSearch.toolName]
         var offered: [OfferedTool] = []
         for (server, client, tools) in servers {
             for tool in tools {
@@ -62,12 +62,15 @@ enum ReplyTool {
     case image(connection: String, config: ServerConfig, model: String)
     /// `fetch_url`, which the app runs itself from this device.
     case fetch
+    /// `web_search`, which the app runs through Serper with the user's key.
+    case search(SerperClient)
 
     var name: String {
         switch self {
         case .mcp(let tool): tool.name
         case .image: ImageRequest.toolName
         case .fetch: FetchRequest.toolName
+        case .search: WebSearch.toolName
         }
     }
 
@@ -76,15 +79,17 @@ enum ReplyTool {
         case .mcp(let tool): tool.spec
         case .image: ImageRequest.toolSpec
         case .fetch: FetchRequest.toolSpec
+        case .search: WebSearch.toolSpec
         }
     }
 
-    /// Shown beside `call`: the MCP server's name, the image connection's, or the address of the page.
+    /// Shown beside `call`: the MCP server's name, the image connection's, the address of the page, or the query.
     func serverName(for call: ToolCall) -> String {
         switch self {
         case .mcp(let tool): tool.server.name
         case .image(let connection, _, _): connection
         case .fetch: FetchRequest.address(in: call.arguments)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        case .search: WebSearch.query(in: call.arguments) ?? ""
         }
     }
 }
