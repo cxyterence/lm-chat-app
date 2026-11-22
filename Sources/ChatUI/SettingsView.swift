@@ -2,12 +2,12 @@ import ChatCore
 import SwiftUI
 
 enum SettingsPage: String, CaseIterable, Identifiable {
-    case connections, apiKeys, mcp, imageTool, webPages, background, appearance
+    case connections, webSearch, mcp, imageTool, webPages, background, appearance
 
     var id: Self { self }
     var title: String {
         switch self {
-        case .apiKeys: "API Keys"
+        case .webSearch: "Web Search"
         case .mcp: "MCP Connections"
         case .imageTool: "Image Generation"
         case .webPages: "Web Pages"
@@ -18,7 +18,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .connections: "network"
-        case .apiKeys: "key"
+        case .webSearch: "magnifyingglass"
         case .mcp: "point.3.connected.trianglepath.dotted"
         case .imageTool: "photo"
         case .webPages: "link"
@@ -79,7 +79,7 @@ struct SettingsView: View {
                 Group {
                     switch page {
                     case .connections: ConnectionsSettings(store: store) { path.append($0) }
-                    case .apiKeys: APIKeysSettings(store: store)
+                    case .webSearch: WebSearchSettings(store: store)
                     case .mcp: MCPSettings(store: store) { path.append($0) }
                     case .imageTool: ImageToolSettings(store: store)
                     case .webPages: WebPagesSettings(store: store)
@@ -115,8 +115,7 @@ struct SettingsView: View {
         case .connections: store.activeConnection?.name ?? "Not set"
         case .mcp:
             store.mcpServers.filter(\.enabled).map(\.name).joined(separator: ", ")
-        case .apiKeys:
-            APIService.allCases.filter { !store.serviceKey($0).isEmpty }.map(\.name).joined(separator: ", ")
+        case .webSearch: store.serviceKey(.serper).isEmpty ? "No key" : store.searchesWeb ? "On" : "Off"
         case .imageTool: store.imageTool?.model ?? ""
         case .webPages: store.fetchesPages ? "On" : "Off"
         case .background: store.continuesLongReplies ? "On" : "Off"
@@ -352,15 +351,23 @@ struct ConnectionEditor: View {
     }
 }
 
-struct APIKeysSettings: View {
+/// Lets chat models search the web through `web_search`, and holds the Serper key that it and `/web-search` use.
+struct WebSearchSettings: View {
     let store: ChatStore
     @Environment(\.palette) private var palette
 
     var body: some View {
+        let hasKey = !store.serviceKey(.serper).isEmpty
         Form {
-            ForEach(APIService.allCases) { service in
-                ServiceKeyRow(store: store, service: service)
+            Section {
+                Toggle("Search the web", isOn: Binding(get: { hasKey && store.searchesWeb }, set: store.setSearchesWeb))
+                    .disabled(!hasKey)
+            } footer: {
+                Text("A chat model that supports tool calling searches Google when a question needs current information. The model writes the queries, and they are sent to Serper. /web-search searches on request with any model."
+                     + (hasKey ? "" : " Add a Serper key below to turn this on."))
             }
+            .listRowBackground(palette.surface)
+            ServiceKeyRow(store: store, service: .serper)
         }
         .formStyle(.grouped)
         .foregroundStyle(palette.text)

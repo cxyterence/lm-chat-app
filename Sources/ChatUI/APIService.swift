@@ -14,7 +14,7 @@ enum APIService: String, CaseIterable, Identifiable {
 
     var purpose: String {
         switch self {
-        case .serper: "Google search results for /web-search."
+        case .serper: "Google search results for web search and /web-search."
         }
     }
 
